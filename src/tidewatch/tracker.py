@@ -63,9 +63,19 @@ def record_signal(
     reasons_bear: list[str],
     conflicts: list[dict],
 ) -> int:
-    """记录一次分析信号"""
+    """记录一次分析信号（同一 symbol 5分钟内不重复记录）"""
     conn = _get_conn()
     try:
+        # 去重：同一 symbol 5分钟内不重复写入
+        cutoff = (datetime.now() - timedelta(minutes=5)).isoformat()
+        existing = conn.execute(
+            "SELECT id FROM signals WHERE symbol = ? AND timestamp > ?",
+            (symbol, cutoff),
+        ).fetchone()
+        if existing:
+            logger.info(f"⏭️ 信号去重: {symbol} 5分钟内已记录 (#{existing['id']})")
+            return existing["id"]
+
         cursor = conn.execute(
             """INSERT INTO signals 
                (timestamp, symbol, name, score, direction, price_at_signal, 
