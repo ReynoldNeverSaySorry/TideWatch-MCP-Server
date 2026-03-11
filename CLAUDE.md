@@ -28,13 +28,14 @@ TideWatch/
 │       ├── technical.py    # 技术分析引擎
 │       ├── regime.py       # 市场体制识别
 │       ├── narrative.py    # 叙事式分析报告生成
+│       ├── llm.py          # LLM 叙事润色 (CopilotX + Claude Sonnet 4)
 │       ├── tracker.py      # 信号追踪系统 (SQLite, 5min去重)
 │       └── guardrails.py   # 行为护栏 (Anti-FOMO, 3条规则)
 └── data/                   # 运行时数据 (git-ignored)
     └── signals.db          # 信号追踪数据库
 ```
 
-注意：Phase 3 计划加入产业链图谱和 LLM 叙事润色。Phase 4 加入 Web Dashboard。
+注意：Phase 3 已完成 LLM 叙事润色。产业链图谝和雪球数据源等积累足够信号数据后再开工。
 
 ## MCP Tools
 
@@ -74,8 +75,8 @@ TideWatch/
 - [x] scan_market 工具（全市场扫描 Top/Bottom N 强弱股）
 
 ### Phase 3: 深度进化
-- [ ] 产业链图谱 v1（新能源/AI/消费核心链硬编码）
-- [ ] LLM 叙事润色（接 CopilotX API）
+- [x] LLM 叙事润色（CopilotX API + Claude Sonnet 4，失败 fallback 模板叙事）(2026-03-12)
+- [ ] 产业链图谝 v1（新能源/AI/消费核心链硬编码）
 - [ ] 雪球数据源（备用，实时数据更快）
 
 ### Phase 4: 触达层
