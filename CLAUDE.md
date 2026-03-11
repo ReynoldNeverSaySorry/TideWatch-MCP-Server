@@ -80,6 +80,7 @@ TideWatch/
 - [ ] 雪球数据源（备用，实时数据更快）
 
 ### Phase 4: 触达层
+- [ ] Azure VM 远程部署（FastMCP HTTP + Nginx + SSL → `tidewatch.polly.wang/mcp`，参考 Stylist-MCP-Server）
 - [ ] Web Dashboard（Next.js 前端 + REST API）
 - [ ] 实时推送（自选股监控 + 信号变化通知）
 
