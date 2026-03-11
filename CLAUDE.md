@@ -23,12 +23,14 @@ TideWatch/
 ├── src/
 │   └── tidewatch/          # Python 包 (import tidewatch.xxx)
 │       ├── __init__.py
-│       ├── server.py       # ⭐ MCP 主入口 (FastMCP + 7 tools)
+│       ├── server.py       # ⭐ MCP 主入口 (FastMCP + 9 tools)
 │       ├── data.py         # 数据层 (AKShare, 带缓存)
 │       ├── technical.py    # 技术分析引擎
 │       ├── regime.py       # 市场体制识别
-│       └── narrative.py    # 叙事式分析报告生成
+│       ├── narrative.py    # 叙事式分析报告生成
+│       └── tracker.py      # 🆕 信号追踪系统 (SQLite)
 └── data/                   # 运行时数据 (git-ignored)
+    └── signals.db          # 信号追踪数据库
 ```
 
 注意：Phase 2 计划加入 `api_server.py` (FastAPI REST API) 和 Web Dashboard，当前 Phase 1 仅 MCP Server。
@@ -43,6 +45,8 @@ TideWatch/
 | `get_money_flow_detail` | 资金流向详细分析 |
 | `get_stock_news_report` | 个股新闻消息面 |
 | `get_north_flow_report` | 北向资金分析 |
+| `review_signals` | 🆕 查看历史信号和胜率统计 |
+| `update_signal_outcomes` | 🆕 回填历史信号实际走势 |
 | `server_status` | 服务器状态 |
 
 ## Design Principles
@@ -62,9 +66,9 @@ TideWatch/
 - [x] 叙事式分析报告（形态驱动开场 + 多空博弈 + 有立场结论）
 - [x] 代理兼容（NO_PROXY + 失败冷却60s + 日K线fallback）
 
-### Phase 2: 引擎增强（下一步）
-- [ ] 信号追踪系统（SQLite，每次分析自动记录，追踪后续走势算胜率）
-- [ ] 行为护栏 v1（追高检测 / 集中度预警 / 连续亏损检测）
+### Phase 2: 引擎增强
+- [x] 信号追踪系统（SQLite，每次分析自动记录，5/10/20日胜率回填）(2026-03-12)
+- [ ] 行为护栏 v1（追高检测 / 分析频次提醒 / 连续看空检测）
 - [ ] scan_market 工具（全市场扫描 Top/Bottom 10 强弱股）
 
 ### Phase 3: 深度进化
