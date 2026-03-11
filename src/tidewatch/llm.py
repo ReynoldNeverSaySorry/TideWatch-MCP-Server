@@ -58,7 +58,7 @@ def polish_narrative(
     if client is None:
         return template_narrative
 
-    model = model or os.getenv("COPILOTX_MODEL", "claude-sonnet-4-20250514")
+    model = model or os.getenv("COPILOTX_MODEL", "claude-sonnet-4")
 
     prompt = f"""你是一位经验丰富的A股分析师，正在和朋友聊投资。
 请将以下分析报告润色为更自然、更有"聊天感"的短评。
