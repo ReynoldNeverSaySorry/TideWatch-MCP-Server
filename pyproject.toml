@@ -14,6 +14,7 @@ akshare = ">=1.15.0"
 pandas = ">=2.0.0"
 numpy = ">=1.24.0"
 python-dotenv = ">=1.0.0"
+openai = ">=1.0.0"
 
 [tool.poetry.scripts]
 tidewatch = "tidewatch.server:main"

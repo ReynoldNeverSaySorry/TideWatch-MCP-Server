@@ -24,6 +24,7 @@ from fastmcp import FastMCP
 
 from .data import MarketData
 from .guardrails import check_guardrails
+from .llm import polish_narrative
 from .narrative import NarrativeGenerator
 from .regime import RegimeDetector
 from .technical import TechnicalAnalyzer
@@ -215,7 +216,15 @@ async def analyze_stock(
         "timestamp": datetime.now().isoformat(),
     }
 
-    # 9. 行为护栏检测
+    # 9. LLM 叙事润色（可选，失败时保留模板叙事）
+    try:
+        report["narrative"] = polish_narrative(
+            report["narrative"], stock_name, adjusted_score
+        )
+    except Exception as e:
+        logger.debug(f"LLM 润色跳过: {e}")
+
+    # 10. 行为护栏检测
     try:
         guardrail_warnings = check_guardrails(symbol, tech)
         if guardrail_warnings:
