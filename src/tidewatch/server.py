@@ -26,6 +26,7 @@ from .data import MarketData
 from .narrative import NarrativeGenerator
 from .regime import RegimeDetector
 from .technical import TechnicalAnalyzer
+from .tracker import record_signal, get_recent_signals, get_signal_stats, update_outcomes
 
 # ============================================================================
 # 配置加载
@@ -212,6 +213,24 @@ async def analyze_stock(
         "narrative": narrator.generate(stock_name, tech, regime_result, money, conflicts, final_signal),
         "timestamp": datetime.now().isoformat(),
     }
+
+    # 9. 记录信号到追踪系统（自动，不影响主流程）
+    try:
+        signal_id = record_signal(
+            symbol=symbol,
+            name=stock_name,
+            score=adjusted_score,
+            direction=final_signal,
+            price=report["stock"]["price"],
+            regime=regime_result.get("regime", "unknown"),
+            confidence=tech["trend"]["confidence"],
+            reasons_bull=tech["trend"].get("reasons_bull", []),
+            reasons_bear=tech["trend"].get("reasons_bear", []),
+            conflicts=conflicts,
+        )
+        report["signal"]["tracked_id"] = signal_id
+    except Exception as e:
+        logger.warning(f"信号记录失败: {e}")
 
     return report
 
@@ -439,7 +458,7 @@ async def server_status():
     """
     return {
         "name": "观潮 (TideWatch)",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "description": "AI 投研搭档 — 多维融合股票分析引擎",
         "stats": server_stats,
         "tools": [
@@ -449,7 +468,76 @@ async def server_status():
             "get_money_flow_detail — 资金流向详细分析",
             "get_stock_news_report — 个股新闻消息面",
             "get_north_flow_report — 北向资金分析",
+            "review_signals — 🆕 查看历史信号和胜率统计",
+            "update_signal_outcomes — 🆕 回填历史信号实际走势",
         ],
+    }
+
+
+@mcp.tool()
+async def review_signals(days: int = 30, symbol: str = ""):
+    """
+    查看历史信号和胜率统计 — 观潮的自省系统
+
+    回顾过去 N 天的所有分析信号，检查哪些判断对了、哪些错了。
+    胜率数据需要先运行 update_signal_outcomes 回填。
+
+    Args:
+        days: 查看天数（默认30天）
+        symbol: 可选，指定股票代码只看该票
+
+    Returns:
+        信号列表 + 胜率统计
+    """
+    stats = get_signal_stats(days=days)
+    recent = get_recent_signals(days=days, symbol=symbol if symbol else None)
+
+    # 简化信号列表（只保留关键字段）
+    signals_summary = []
+    for s in recent[:50]:  # 最多50条
+        entry = {
+            "id": s["id"],
+            "date": s["timestamp"][:10],
+            "symbol": s["symbol"],
+            "name": s["name"],
+            "direction": s["direction"],
+            "score": s["score"],
+            "price": s["price_at_signal"],
+        }
+        # 添加回填结果（如果有）
+        if s.get("pct_5d") is not None:
+            entry["5d"] = f"{s['pct_5d']:+.1f}% ({s['outcome_5d']})"
+        if s.get("pct_10d") is not None:
+            entry["10d"] = f"{s['pct_10d']:+.1f}% ({s['outcome_10d']})"
+        if s.get("pct_20d") is not None:
+            entry["20d"] = f"{s['pct_20d']:+.1f}% ({s['outcome_20d']})"
+        signals_summary.append(entry)
+
+    return {
+        "stats": stats,
+        "signals": signals_summary,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@mcp.tool()
+async def update_signal_outcomes():
+    """
+    回填历史信号的实际走势 — 计算胜率
+
+    检查所有未回填的历史信号，获取信号发出后 5/10/20 个交易日的实际价格，
+    计算涨跌幅并判断信号是否正确。
+
+    建议每天收盘后运行一次。
+
+    Returns:
+        回填统计（更新了多少条 5d/10d/20d 记录）
+    """
+    result = update_outcomes(market_data)
+    return {
+        "updated": result,
+        "message": f"回填完成: 5日={result['5d']}条, 10日={result['10d']}条, 20日={result['20d']}条",
+        "timestamp": datetime.now().isoformat(),
     }
 
 

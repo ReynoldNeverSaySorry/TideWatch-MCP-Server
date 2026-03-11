@@ -6,5 +6,6 @@ dist/
 build/
 .venv/
 *.log
+*.db
 .mypy_cache/
 .pytest_cache/
