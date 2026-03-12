@@ -169,57 +169,53 @@ async def analyze_stock(
     """
     logger.info(f"📊 开始分析: {symbol}")
 
-    # 1. 获取日K线（核心数据源，必须成功）
-    df = market_data.get_stock_daily(symbol, days=days)
+    # ETF 检测（纯前缀判断，无网络请求）
+    is_etf = market_data._is_etf(symbol)
+
+    # 并发拉取四个独立数据源（K线 + 指数 + 资金 + 新闻）
+    index_code = "000001"  # 上证指数
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        f_daily = executor.submit(market_data.get_stock_daily, symbol, days)
+        f_index = executor.submit(market_data.get_index_daily, index_code, days)
+        f_money = executor.submit(market_data.get_money_flow, symbol) if include_money_flow and not is_etf else None
+        f_news = executor.submit(market_data.get_stock_news, symbol, 5) if include_news and not is_etf else None
+
+    # 1. 日K线（核心数据源，必须成功）
+    df = f_daily.result()
     if df.empty:
         return {"error": f"无法获取 {symbol} 的行情数据"}
 
-    # 2. 技术分析（基于日K线，不依赖实时数据）
+    # 2. 技术分析（基于日K线）
     tech = technical.analyze(df)
     if "error" in tech:
         return tech
 
-    # 股票名称和实时行情（可选，失败时 fallback 到日K线）
-    try:
-        stock_name = market_data.get_stock_name(symbol)
-    except Exception:
-        stock_name = symbol
-    if stock_name == symbol:
-        # 日K线列名里没有名称，保持代码
-        stock_name = symbol
+    # 股票名称（优先 HOT_NAMES，fallback 到代码）
+    stock_name = HOT_NAMES.get(symbol) or market_data.get_stock_name(symbol)
+
+    # 实时行情 fallback 到日K线最后一条
     try:
         realtime = market_data.get_stock_realtime(symbol)
     except Exception:
         realtime = {}
-    # fallback: 实时数据不可用时用日K线最后一条补全
     if realtime.get("fallback") or not realtime.get("price"):
         last = df.iloc[-1]
         realtime = {
             "price": float(last["close"]),
             "pct_change": float(last.get("pct_change", 0)),
-            "pe": 0,
-            "pb": 0,
-            "total_mv": 0,
+            "pe": 0, "pb": 0, "total_mv": 0,
         }
 
-    # 3. 市场体制
-    index_code = "000001"  # 上证指数
-    index_df = market_data.get_index_daily(index_code, days=days)
+    # 3. 市场体制（已并发拉取）
+    index_df = f_index.result()
     regime_result = regime_detector.detect(index_df)
     regime_adj = regime_detector.get_regime_adjustment(regime_result["regime"])
 
-    # ETF 没有资金流向和个股新闻
-    is_etf = market_data._is_etf(symbol)
+    # 4. 资金面（已并发拉取）
+    money = f_money.result() if f_money else {}
 
-    # 4. 资金面
-    money = {}
-    if include_money_flow and not is_etf:
-        money = market_data.get_money_flow(symbol)
-
-    # 5. 消息面
-    news = []
-    if include_news and not is_etf:
-        news = market_data.get_stock_news(symbol, limit=5)
+    # 5. 消息面（已并发拉取）
+    news = f_news.result() if f_news else []
 
     # 6. 冲突检测
     conflicts = _detect_conflicts(tech, money, regime_result)
