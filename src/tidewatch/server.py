@@ -767,9 +767,14 @@ async def scan_market(top_n: int = 10):
                 "reasons_bear": tech_result["trend"]["reasons_bear"][:3],
             }
 
+            # 7日 sparkline 数据（迷你趋势线）
+            close_col = "close" if "close" in daily.columns else "收盘"
+            result["sparkline"] = [round(float(x), 2) for x in daily[close_col].tail(7).tolist()]
+
             # 持仓额外信息
             if code in holdings_info:
                 h = holdings_info[code]
+                result["added_at"] = h.get("added_at", "")
                 if h.get("cost") and h["cost"] > 0:
                     result["cost"] = h["cost"]
                     result["shares"] = h.get("shares", 0)
