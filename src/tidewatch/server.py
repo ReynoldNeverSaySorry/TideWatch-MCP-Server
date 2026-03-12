@@ -130,12 +130,13 @@ _SCAN_CACHE_TTL = 300  # 5分钟
 async def health_check(request):
     """Health check endpoint (no auth required)"""
     from starlette.responses import JSONResponse
+    tools = await mcp.list_tools()
     return JSONResponse({
         "status": "healthy",
         "server": "TideWatch-观潮",
         "version": VERSION,
         "transport": "streamable-http",
-        "tools_count": len(mcp._tool_manager._tools) if hasattr(mcp, '_tool_manager') else "?",
+        "tools_count": len(tools),
         "auth_enabled": MCP_API_KEY_ENABLED,
         "analyses_completed": server_stats["analyses_completed"],
     })
