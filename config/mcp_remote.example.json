@@ -1,0 +1,8 @@
+{
+    "TideWatch-Remote": {
+        "url": "https://tidewatch.polly.wang/mcp",
+        "headers": {
+            "X-API-Key": "polly-tidewatch-YOUR-KEY-HERE"
+        }
+    }
+}

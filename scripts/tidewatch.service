@@ -1,0 +1,20 @@
+[Unit]
+Description=TideWatch MCP Server (观潮 AI 投研搭档)
+After=network.target
+
+[Service]
+Type=simple
+User=azureuser
+Group=azureuser
+WorkingDirectory=/home/azureuser/GitHub_Workspace/TideWatch-MCP-Server
+ExecStart=/home/azureuser/.local/bin/poetry run tidewatch --http --port 8889
+Restart=always
+RestartSec=5
+Environment=PATH=/home/azureuser/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# Logging
+StandardOutput=append:/home/azureuser/GitHub_Workspace/TideWatch-MCP-Server/data/tidewatch-service.log
+StandardError=append:/home/azureuser/GitHub_Workspace/TideWatch-MCP-Server/data/tidewatch-service.log
+
+[Install]
+WantedBy=multi-user.target

@@ -2,6 +2,26 @@
 观潮 (TideWatch) — MCP Server
 AI 投研搭档，多维融合股票分析引擎
 
+Supports two transport modes:
+  - stdio:  For local Claude Desktop / Cursor integration (default)
+  - http:   For remote HTTP access (Streamable HTTP)
+
+Usage:
+    # stdio mode (default, for local use)
+    poetry run tidewatch
+
+    # HTTP mode (for remote access behind Nginx)
+    poetry run tidewatch --http --port 8889
+
+    # Or with uvicorn directly
+    uvicorn tidewatch.server:http_app --host 0.0.0.0 --port 8889
+
+Client Configuration:
+    {
+        "url": "https://tidewatch.polly.wang/mcp",
+        "headers": {"X-API-Key": "your-api-key"}
+    }
+
 MCP Tools:
   - analyze_stock     个股综合分析（技术面+资金面+消息面）
   - get_regime        市场体制识别（牛/熊/横盘/高波动）
@@ -11,6 +31,9 @@ MCP Tools:
   - get_stock_news    个股相关新闻
 """
 
+import argparse
+import argparse
+import asyncio
 import logging
 import os
 import sys
@@ -21,6 +44,7 @@ from typing import Any
 import pandas as pd
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from fastmcp.server.auth import TokenVerifier, AccessToken
 
 from .data import MarketData
 from .guardrails import check_guardrails
@@ -76,6 +100,10 @@ market_data = MarketData()
 technical = TechnicalAnalyzer()
 regime_detector = RegimeDetector()
 narrator = NarrativeGenerator()
+
+# HTTP 远程部署配置
+MCP_API_KEY = os.getenv("MCP_API_KEY", "")
+MCP_API_KEY_ENABLED = bool(MCP_API_KEY)
 
 # 服务器统计
 server_stats = {
@@ -734,16 +762,112 @@ def _detect_conflicts(
 
 
 # ============================================================================
+# HTTP Transport: API Key Authentication Middleware
+# ============================================================================
+
+
+class APIKeyMiddleware:
+    """Pure ASGI middleware to validate API key for protected endpoints."""
+
+    PUBLIC_PATHS = {"/health", "/favicon.ico"}
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        if not MCP_API_KEY_ENABLED:
+            await self.app(scope, receive, send)
+            return
+
+        path = scope["path"]
+        if path in self.PUBLIC_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        # Extract API key from headers
+        api_key = None
+        headers = dict(scope.get("headers", []))
+        api_key = headers.get(b"x-api-key", b"").decode()
+        if not api_key:
+            auth_header = headers.get(b"authorization", b"").decode()
+            if auth_header.startswith("Bearer "):
+                api_key = auth_header[7:]
+
+        if api_key != MCP_API_KEY:
+            from starlette.responses import JSONResponse
+            response = JSONResponse(
+                {"error": "Unauthorized", "message": "Invalid or missing API key"},
+                status_code=401,
+            )
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
+
+
+def _build_middleware():
+    """Build middleware list for HTTP mode."""
+    from starlette.middleware import Middleware
+    from starlette.middleware.cors import CORSMiddleware
+
+    middlewares = [
+        Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]),
+    ]
+    if MCP_API_KEY_ENABLED:
+        middlewares.append(Middleware(APIKeyMiddleware))
+    return middlewares
+
+
+def _create_http_app():
+    """Create ASGI app for uvicorn direct usage."""
+    return mcp.http_app(
+        path="/mcp",
+        middleware=_build_middleware(),
+        json_response=True,
+        stateless_http=True,
+    )
+
+
+# Expose for `uvicorn tidewatch.server:http_app`
+http_app = _create_http_app()
+
+
+# ============================================================================
 # Entry Point
 # ============================================================================
 
 
 def main():
-    """启动 TideWatch MCP Server"""
+    """启动 TideWatch MCP Server（支持 stdio / http 双模式）"""
+    parser = argparse.ArgumentParser(description="观潮 (TideWatch) MCP Server")
+    parser.add_argument("--http", action="store_true", help="Run in HTTP mode (default: stdio)")
+    parser.add_argument("--host", default="0.0.0.0", help="HTTP host (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8889, help="HTTP port (default: 8889)")
+    args = parser.parse_args()
+
     logger.info("🌊 观潮 (TideWatch) MCP Server 启动中...")
     logger.info("版本: 0.1.0")
     logger.info("工具: analyze_stock, get_regime, compare_stocks, get_money_flow_detail, get_stock_news_report, get_north_flow_report")
-    mcp.run()
+
+    if args.http:
+        logger.info(f"传输模式: HTTP (Streamable HTTP) → {args.host}:{args.port}/mcp")
+        logger.info(f"API Key 认证: {'✅ 已启用' if MCP_API_KEY_ENABLED else '❌ 未配置'}")
+        mcp.run(
+            transport="streamable-http",
+            host=args.host,
+            port=args.port,
+            path="/mcp",
+            middleware=_build_middleware(),
+            json_response=True,
+            stateless_http=True,
+        )
+    else:
+        logger.info("传输模式: stdio (本地)")
+        mcp.run()
 
 
 if __name__ == "__main__":
