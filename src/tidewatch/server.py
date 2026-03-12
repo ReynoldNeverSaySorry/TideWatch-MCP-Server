@@ -641,7 +641,7 @@ async def manage_holdings(
     elif action == "add":
         if not symbol:
             return {"error": "请提供股票代码"}
-        name = market_data.get_stock_name(symbol)
+        name = HOT_NAMES.get(symbol) or market_data.get_stock_name(symbol)
         add_holding(symbol, name=name, cost=cost, shares=shares)
         return {
             "message": f"✅ 已添加持仓: {symbol} {name}" + (f" 成本{cost} ×{shares}股" if cost else ""),
@@ -686,7 +686,7 @@ async def manage_watchlist(
     elif action == "add":
         if not symbol:
             return {"error": "请提供股票代码"}
-        name = market_data.get_stock_name(symbol)
+        name = HOT_NAMES.get(symbol) or market_data.get_stock_name(symbol)
         add_watchlist(symbol, name=name, reason=reason)
         return {
             "message": f"✅ 已添加自选: {symbol} {name}" + (f" ({reason})" if reason else ""),
