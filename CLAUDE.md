@@ -156,7 +156,7 @@ tidewatch.polly.wang:443 (Nginx + Let's Encrypt SSL)
 
 ## Known Issues
 
-- `stock_zh_a_spot_em()` 在本地 Mac 上无法使用 — 根因是 DNS 解析问题：`push2.eastmoney.com` 通过 `push2ipv6.trafficmanager.cn` 做区域路由，Google DNS (8.8.8.8) 解析到的节点 (43.144.251.121) 返回 Empty reply。国内 DNS (114.114.114.114) 解析到不同 IP (47.112.165.11) 但同样无响应。**部署到 Azure VM 后自动解决**。影响范围：`scan_market`、`get_stock_realtime`、`get_stock_name`（已有 fallback）
+- `stock_zh_a_spot_em()` 在本地 Mac 和 Azure VM 上均无法使用 — 根因是东方财富 `push2.eastmoney.com` 对非浏览器请求做了反爬限制（SSL 握手成功但返回 Empty reply），与 DNS 和地域无关。影响范围：`scan_market`、`get_stock_realtime`、`get_stock_name`（已有 fallback）。其他 AKShare 接口（日K线 `stock_zh_a_hist`、资金流向、新闻等）正常
 - MCP 工具不要加 `dict[str, Any]` 返回类型注解（FastMCP 2.x outputSchema 冲突）
 - 日志必须输出到 stderr（MCP 用 stdout 通信）
 - 信号记录已加 5 分钟去重窗口，同一 symbol 短时间内不重复入库
