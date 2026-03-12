@@ -43,7 +43,7 @@ TideWatch-MCP-Server/
     └── signals.db          # 信号追踪数据库
 ```
 
-注意：Phase 3 已完成 LLM 叙事润色。产业链图谝和雪球数据源等积累足够信号数据后再开工。
+注意：Phase 3 已完成 LLM 叙事润色。产业链图谱和雪球数据源等积累足够信号数据后再开工。
 
 ## MCP Tools
 
@@ -84,7 +84,7 @@ TideWatch-MCP-Server/
 
 ### Phase 3: 深度进化
 - [x] LLM 叙事润色（CopilotX API + Claude Sonnet 4，失败 fallback 模板叙事）(2026-03-12)
-- [ ] 产业链图谝 v1（新能源/AI/消费核心链硬编码）
+- [ ] 产业链图谱 v1（新能源/AI/消费核心链硬编码）
 - [ ] 雪球数据源（备用，实时数据更快）
 
 ### Phase 4: 触达层
@@ -136,7 +136,7 @@ tidewatch.polly.wang:443 (Nginx + Let's Encrypt SSL)
 ### 部署步骤
 1. Cloudflare 加 A 记录: `tidewatch` → Azure VM IP
 2. Azure VM 上 `git clone` + `./setup.sh`
-3. 编辑 `.env` 设置 `MCP_API_KEY` 和 `COPILOTX_API_KEY`
+3. 编辑 `.env` 设置 `COPILOTX_API_KEY`（`MCP_API_KEY` 由 setup.sh 自动生成）
 4. `sudo ./scripts/setup_domain.sh` (配置 Nginx + SSL)
 5. `sudo systemctl enable --now tidewatch`
 
