@@ -49,6 +49,11 @@ class MarketData:
     # 行情数据
     # ========================
 
+    @staticmethod
+    def _is_etf(symbol: str) -> bool:
+        """判断是否为 ETF 代码（51xxxx/15xxxx/16xxxx/56xxxx/58xxxx）"""
+        return symbol[:2] in ("51", "15", "16", "56", "58") and len(symbol) == 6
+
     def get_stock_daily(
         self,
         symbol: str,
@@ -56,10 +61,10 @@ class MarketData:
         adjust: str = "qfq",
     ) -> pd.DataFrame:
         """
-        获取个股日K线数据
+        获取个股/ETF 日K线数据
 
         Args:
-            symbol: 股票代码（纯数字，如 "002111"）
+            symbol: 股票或ETF代码（纯数字，如 "002111" 或 "512400"）
             days: 获取天数
             adjust: 复权方式 qfq=前复权, hfq=后复权, ""=不复权
 
@@ -70,13 +75,22 @@ class MarketData:
         start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
 
         try:
-            df = ak.stock_zh_a_hist(
-                symbol=symbol,
-                period="daily",
-                start_date=start,
-                end_date=end,
-                adjust=adjust,
-            )
+            if self._is_etf(symbol):
+                df = ak.fund_etf_hist_em(
+                    symbol=symbol,
+                    period="daily",
+                    start_date=start,
+                    end_date=end,
+                    adjust=adjust,
+                )
+            else:
+                df = ak.stock_zh_a_hist(
+                    symbol=symbol,
+                    period="daily",
+                    start_date=start,
+                    end_date=end,
+                    adjust=adjust,
+                )
             # 统一列名
             df = df.rename(columns={
                 "日期": "date",
@@ -139,7 +153,19 @@ class MarketData:
             return {"fallback": True, "code": symbol}
 
     def get_stock_name(self, symbol: str) -> str:
-        """根据代码获取股票名称（实时数据不可用时 fallback 到代码本身）"""
+        """根据代码获取股票/ETF名称"""
+        # ETF 名称查询
+        if self._is_etf(symbol):
+            try:
+                df = ak.fund_etf_spot_em()
+                if not df.empty and "代码" in df.columns:
+                    row = df[df["代码"] == symbol]
+                    if not row.empty:
+                        return str(row.iloc[0].get("名称", symbol))
+            except Exception:
+                pass
+            return symbol
+        # 个股名称查询
         try:
             df = self._get_spot_cache()
             if not df.empty and "代码" in df.columns:

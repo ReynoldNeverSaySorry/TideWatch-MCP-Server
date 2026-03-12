@@ -154,14 +154,17 @@ async def analyze_stock(
     regime_result = regime_detector.detect(index_df)
     regime_adj = regime_detector.get_regime_adjustment(regime_result["regime"])
 
+    # ETF 没有资金流向和个股新闻
+    is_etf = market_data._is_etf(symbol)
+
     # 4. 资金面
     money = {}
-    if include_money_flow:
+    if include_money_flow and not is_etf:
         money = market_data.get_money_flow(symbol)
 
     # 5. 消息面
     news = []
-    if include_news:
+    if include_news and not is_etf:
         news = market_data.get_stock_news(symbol, limit=5)
 
     # 6. 冲突检测
