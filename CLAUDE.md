@@ -51,7 +51,7 @@ TideWatch-MCP-Server/
 | Tool | 用途 |
 |------|------|
 | `analyze_stock` | ⭐ 核心：个股综合分析（技术+资金+消息+体制） |
-| `get_regime` | 市场体制识别（牛/熊/横盘/高波动） |
+| `get_regime` | 今日潮势速读（牛/熊/横盘/高波动） |
 | `compare_stocks` | 多股横向对比 |
 | `get_money_flow_detail` | 资金流向详细分析 |
 | `get_stock_news_report` | 个股新闻消息面 |

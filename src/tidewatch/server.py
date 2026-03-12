@@ -314,7 +314,7 @@ async def analyze_stock(
 @mcp.tool()
 async def get_regime():
     """
-    市场体制识别 — 判断当前大盘处于什么阶段
+    今日潮势 — 大盘现在是顺风出海还是暴风骤雨？
 
     通过上证指数的均线斜率、波动率、涨跌比等指标，
     识别市场处于 牛市/熊市/横盘/高波动 中的哪个阶段。
@@ -323,7 +323,7 @@ async def get_regime():
     Returns:
         当前市场体制及其对交易信号的调整建议
     """
-    logger.info("🌊 分析市场体制")
+    logger.info("🌊 感知潮势...")
 
     index_df = market_data.get_index_daily("000001", days=120)
     regime_result = regime_detector.detect(index_df)
