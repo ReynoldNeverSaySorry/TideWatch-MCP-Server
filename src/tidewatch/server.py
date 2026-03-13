@@ -129,6 +129,7 @@ server_stats = {
 # scan_market 缓存（5分钟内复用上次结果，避免频繁请求被封）
 _scan_cache = {"result": None, "time": 0}
 _SCAN_CACHE_TTL = 300  # 5分钟
+_warmup_done = threading.Event()  # 预热完成标志
 
 
 # ─── 后台预热 & 定时刷新 ─────────────────────────────────
@@ -150,6 +151,8 @@ def _warmup_loop():
         logger.info("🔥 后台预热: 首次 scan_market 完成，缓存已就绪")
     except Exception as e:
         logger.error(f"🔥 后台预热失败: {e}")
+    finally:
+        _warmup_done.set()  # 无论成功失败都标记完成
 
     # 定时刷新循环
     while True:
@@ -300,6 +303,11 @@ async def analyze_stock(
 def _analyze_stock_sync(symbol, include_news, include_money_flow, days, skip_llm):
     t0 = _time.monotonic()
 
+    # 等待预热完成（最多等 120秒，避免资源竞争）
+    if not _warmup_done.is_set():
+        logger.info(f"⏳ {symbol} 等待预热完成...")
+        _warmup_done.wait(timeout=120)
+
     # ETF 检测（纯前缀判断，无网络请求）
     is_etf = market_data._is_etf(symbol)
 
@@ -330,18 +338,14 @@ def _analyze_stock_sync(symbol, include_news, include_money_flow, days, skip_llm
     _w_name = next((w.get("name", "") for w in _wl if w["symbol"] == symbol), "")
     stock_name = _h_name or _w_name or HOT_NAMES.get(symbol) or market_data.get_stock_name(symbol)
 
-    # 实时行情 fallback 到日K线最后一条
-    try:
-        realtime = market_data.get_stock_realtime(symbol)
-    except Exception:
-        realtime = {}
-    if realtime.get("fallback") or not realtime.get("price"):
-        last = df.iloc[-1]
-        realtime = {
-            "price": float(last["close"]),
-            "pct_change": float(last.get("pct_change", 0)),
-            "pe": 0, "pb": 0, "total_mv": 0,
-        }
+    # 实时行情：直接用日K线最后一条（避免 stock_zh_a_spot_em 全市场爬取 60-90s）
+    # 盘中精度差异 <1%，盘后完全一致，性价比远优于实时接口
+    last = df.iloc[-1]
+    realtime = {
+        "price": float(last["close"]),
+        "pct_change": float(last.get("pct_change", 0)),
+        "pe": 0, "pb": 0, "total_mv": 0,
+    }
 
     # 3. 市场体制（已并发拉取）
     index_df = f_index.result()
