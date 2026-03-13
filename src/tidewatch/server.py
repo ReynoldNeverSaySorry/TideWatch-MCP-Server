@@ -31,12 +31,14 @@ MCP Tools:
   - get_stock_news    个股相关新闻
 """
 
+import asyncio
 import argparse
 import concurrent.futures
 import logging
 import os
 import sys
 import time as _time
+import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -130,7 +132,6 @@ _SCAN_CACHE_TTL = 300  # 5分钟
 
 
 # ─── 后台预热 & 定时刷新 ─────────────────────────────────
-import threading
 
 def _is_market_hours():
     """判断是否在 A 股交易时段（工作日 9:15-15:05，北京时间）"""
@@ -293,6 +294,10 @@ async def analyze_stock(
         综合分析报告，包含技术面、资金面、消息面、市场体制、冲突检测
     """
     logger.info(f"📊 开始分析: {symbol}")
+    return await asyncio.to_thread(_analyze_stock_sync, symbol, include_news, include_money_flow, days, skip_llm)
+
+
+def _analyze_stock_sync(symbol, include_news, include_money_flow, days, skip_llm):
 
     # ETF 检测（纯前缀判断，无网络请求）
     is_etf = market_data._is_etf(symbol)
