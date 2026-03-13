@@ -129,6 +129,123 @@ _scan_cache = {"result": None, "time": 0}
 _SCAN_CACHE_TTL = 300  # 5分钟
 
 
+# ─── 后台预热 & 定时刷新 ─────────────────────────────────
+import threading
+
+def _is_market_hours():
+    """判断是否在 A 股交易时段（工作日 9:15-15:05，北京时间）"""
+    now = _now_bj()
+    if now.weekday() >= 5:  # 周末
+        return False
+    hhmm = now.hour * 100 + now.minute
+    return 915 <= hhmm <= 1505
+
+def _warmup_loop():
+    """后台线程：启动预热 + 盘中定时刷新 scan_market 缓存"""
+    _time.sleep(3)  # 等服务就绪
+    logger.info("🔥 后台预热: 首次 scan_market 开始...")
+    try:
+        _run_scan_warmup()
+        logger.info("🔥 后台预热: 首次 scan_market 完成，缓存已就绪")
+    except Exception as e:
+        logger.error(f"🔥 后台预热失败: {e}")
+
+    # 定时刷新循环
+    while True:
+        _time.sleep(_SCAN_CACHE_TTL)  # 每 5 分钟检查一次
+        if _is_market_hours():
+            try:
+                logger.info("🔄 定时刷新: scan_market 缓存更新中...")
+                _run_scan_warmup()
+                logger.info("🔄 定时刷新: scan_market 缓存已更新")
+            except Exception as e:
+                logger.error(f"🔄 定时刷新失败: {e}")
+
+def _run_scan_warmup():
+    """执行 scan_market 的核心逻辑，填充 _scan_cache"""
+    pool = get_scan_pool()
+    holdings_info = {h["symbol"]: h for h in get_holdings()}
+
+    from .technical import TechnicalAnalyzer
+    tech_analyzer = TechnicalAnalyzer()
+
+    def _score_one(code):
+        try:
+            daily = market_data.get_stock_daily(str(code), days=60)
+            if daily.empty:
+                return None
+            tech_result = tech_analyzer.analyze(daily)
+            if "error" in tech_result:
+                return None
+            close_col = "close" if "close" in daily.columns else "收盘"
+            latest_price = float(daily.iloc[-1].get(close_col, 0))
+            pct_col = "pct_change" if "pct_change" in daily.columns else "涨跌幅"
+            pct_today = float(daily.iloc[-1].get(pct_col, 0))
+            stored_name = holdings_info.get(code, {}).get("name", "")
+            if stored_name and stored_name != code:
+                name = stored_name
+            elif code in HOT_NAMES:
+                name = HOT_NAMES[code]
+            else:
+                name = market_data.get_stock_name(str(code))
+            result = {
+                "code": str(code), "name": name,
+                "price": latest_price, "pct_today": pct_today,
+                "score": tech_result["trend"]["score"],
+                "signal": tech_result["trend"]["signal"],
+                "rsi": tech_result["momentum"]["rsi_14"],
+                "reasons_bull": tech_result["trend"]["reasons_bull"][:3],
+                "reasons_bear": tech_result["trend"]["reasons_bear"][:3],
+            }
+            close_vals = "close" if "close" in daily.columns else "收盘"
+            result["sparkline"] = [round(float(x), 2) for x in daily[close_vals].tail(7).tolist()]
+            if code in holdings_info:
+                h = holdings_info[code]
+                result["added_at"] = h.get("added_at", "")
+                if h.get("cost") and h["cost"] > 0:
+                    result["cost"] = h["cost"]
+                    result["shares"] = h.get("shares", 0)
+                    result["pnl_pct"] = round((latest_price - h["cost"]) / h["cost"] * 100, 2)
+                    result["pnl_amount"] = round((latest_price - h["cost"]) * h.get("shares", 0), 2)
+            return result
+        except Exception:
+            return None
+
+    all_symbols = pool["holdings"] + pool["watchlist"] + pool["hot"]
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_sym = {executor.submit(_score_one, sym): sym for sym in all_symbols}
+        for future in concurrent.futures.as_completed(future_to_sym):
+            sym = future_to_sym[future]
+            try:
+                r = future.result()
+                if r:
+                    results[sym] = r
+            except Exception:
+                pass
+
+    holding_results = [results[s] for s in pool["holdings"] if s in results]
+    watchlist_results = [results[s] for s in pool["watchlist"] if s in results]
+    hot_results = [results[s] for s in pool["hot"] if s in results]
+    hot_sorted = sorted(hot_results, key=lambda x: x["score"], reverse=True)
+
+    scan_result = {
+        "holdings": sorted(holding_results, key=lambda x: x["score"], reverse=True),
+        "watchlist": sorted(watchlist_results, key=lambda x: x["score"], reverse=True),
+        "_hot_sorted": hot_sorted,
+        "hot_strongest": hot_sorted[:10],
+        "hot_weakest": sorted(hot_sorted[-10:], key=lambda x: x["score"]) if len(hot_sorted) > 10 else [],
+        "pool_size": {"total": len(all_symbols), "scanned": len(results)},
+        "timestamp": _now_bj().isoformat(),
+    }
+    _scan_cache["result"] = scan_result
+    _scan_cache["time"] = _time.monotonic()
+
+# 启动后台预热线程（daemon=True 跟随主进程退出）
+_warmup_thread = threading.Thread(target=_warmup_loop, daemon=True)
+_warmup_thread.start()
+
+
 # ============================================================================
 # MCP Tools
 # ============================================================================
