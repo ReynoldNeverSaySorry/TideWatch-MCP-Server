@@ -10,6 +10,8 @@ WorkingDirectory=/home/azureuser/GitHub_Workspace/TideWatch-MCP-Server
 ExecStart=/home/azureuser/miniforge3/bin/poetry run tidewatch --http --port 8889
 Restart=always
 RestartSec=5
+TimeoutStopSec=10
+RuntimeMaxSec=14400
 Environment=PATH=/home/azureuser/miniforge3/bin:/home/azureuser/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 # Logging
