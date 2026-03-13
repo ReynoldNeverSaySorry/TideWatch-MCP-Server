@@ -60,12 +60,12 @@ def _check_chasing(symbol: str, tech: dict) -> dict | None:
 
 
 def _check_frequency() -> dict | None:
-    """分析频次提醒：24h内分析超过5只"""
+    """分析频次提醒：24h内分析超过5只不同股票"""
     try:
         recent = get_recent_signals(days=1)
-        count = len(recent)
+        symbols = list({s["symbol"] for s in recent})
+        count = len(symbols)
         if count >= 8:
-            symbols = list({s["symbol"] for s in recent})
             return {
                 "type": "over_analysis",
                 "severity": "medium",
