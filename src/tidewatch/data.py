@@ -15,7 +15,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# baostock 全局连接管理
+# baostock 全局连接管理（单连接 + 线程锁）
+import threading
+_bs_lock = threading.Lock()
 _bs_logged_in = False
 _bs_login_time = 0
 _BS_SESSION_TTL = 30  # 每 30 秒重新登录保持连接新鲜
@@ -109,27 +111,27 @@ class MarketData:
         Returns:
             DataFrame with columns: date, open, close, high, low, volume, pct_change
         """
-        # 优先用 baostock（快、无反爬）
+        # 优先用 baostock（快、无反爬），线程锁保护单连接
         try:
-            _bs_login()
-            bs_code = _to_bs_code(symbol)
-            start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
-            end = datetime.now().strftime("%Y-%m-%d")
-            # baostock 复权映射
-            adj_map = {"qfq": "2", "hfq": "1", "": "3"}
-            adj_flag = adj_map.get(adjust, "2")
+            with _bs_lock:
+                _bs_login()
+                bs_code = _to_bs_code(symbol)
+                start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
+                end = datetime.now().strftime("%Y-%m-%d")
+                adj_map = {"qfq": "2", "hfq": "1", "": "3"}
+                adj_flag = adj_map.get(adjust, "2")
 
-            rs = bs.query_history_k_data_plus(
-                bs_code,
-                "date,open,high,low,close,volume,pctChg",
-                start_date=start,
-                end_date=end,
-                frequency="d",
-                adjustflag=adj_flag,
-            )
-            rows = []
-            while (rs.error_code == "0") and rs.next():
-                rows.append(rs.get_row_data())
+                rs = bs.query_history_k_data_plus(
+                    bs_code,
+                    "date,open,high,low,close,volume,pctChg",
+                    start_date=start,
+                    end_date=end,
+                    frequency="d",
+                    adjustflag=adj_flag,
+                )
+                rows = []
+                while (rs.error_code == "0") and rs.next():
+                    rows.append(rs.get_row_data())
 
             if not rows:
                 logger.debug(f"baostock {symbol}: 0 rows (可能停牌/退市)")
@@ -284,19 +286,20 @@ class MarketData:
         Args:
             index_code: 指数代码（000001=上证, 399001=深证, 399006=创业板）
         """
-        # baostock
+        # baostock（线程锁保护单连接）
         try:
-            _bs_login()
-            bs_code = _to_bs_code(index_code)
-            start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
-            end = datetime.now().strftime("%Y-%m-%d")
-            rs = bs.query_history_k_data_plus(
-                bs_code, "date,open,high,low,close,volume,pctChg",
-                start_date=start, end_date=end, frequency="d",
-            )
-            rows = []
-            while (rs.error_code == "0") and rs.next():
-                rows.append(rs.get_row_data())
+            with _bs_lock:
+                _bs_login()
+                bs_code = _to_bs_code(index_code)
+                start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
+                end = datetime.now().strftime("%Y-%m-%d")
+                rs = bs.query_history_k_data_plus(
+                    bs_code, "date,open,high,low,close,volume,pctChg",
+                    start_date=start, end_date=end, frequency="d",
+                )
+                rows = []
+                while (rs.error_code == "0") and rs.next():
+                    rows.append(rs.get_row_data())
             if rows:
                 df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume", "pct_change"])
                 for col in ["open", "high", "low", "close", "volume", "pct_change"]:
