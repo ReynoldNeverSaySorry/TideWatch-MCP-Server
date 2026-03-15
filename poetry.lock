@@ -140,6 +140,21 @@ docs = ["furo", "jaraco.packaging (>=9.3)", "rst.linker (>=1.9)", "sphinx (>=3.5
 testing = ["jaraco.test", "pytest (!=8.0.*)", "pytest (>=6,!=8.1.*)", "pytest-checkdocs (>=2.4)", "pytest-cov", "pytest-enabler (>=2.2)"]
 
 [[package]]
+name = "baostock"
+version = "0.8.9"
+description = "A tool for obtaining historical data of China stock market"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "baostock-0.8.9-py3-none-any.whl", hash = "sha256:7a51fb30cd6b4325f5517198e350dc2fffaaab2923cd132b9f747b8b73ae7303"},
+    {file = "baostock-0.8.9.tar.gz", hash = "sha256:8169cdbed14fa442ace63c59549bef3f92b0c3dd1df9e5d9069f7bd04a76b0da"},
+]
+
+[package.dependencies]
+pandas = ">=0.18.0"
+
+[[package]]
 name = "beartype"
 version = "0.22.9"
 description = "Unbearably fast near-real-time pure-Python runtime-static type-checker."
@@ -3138,4 +3153,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.10"
-content-hash = "4145a04923a33b70464a7d32b25b7cc8cca070e1c59fb463a6381d336b209f90"
+content-hash = "b7447ff86ec54b005fac54325e175b25e2b53e5448a86534ca3b75f5e7c95f63"

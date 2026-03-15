@@ -1,6 +1,7 @@
 """
-数据层 — AKShare 数据获取
-负责从 AKShare 获取 A 股行情、基本面、资金流向等数据
+数据层 — baostock (日K线) + AKShare (资金/新闻/龙虎榜)
+baostock: 无反爬、无限流、无需注册，日K线主力数据源
+AKShare: 资金流向、新闻、龙虎榜、北向资金等 baostock 不覆盖的接口
 """
 
 import logging
@@ -9,9 +10,32 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import akshare as ak
+import baostock as bs
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# baostock 全局连接管理
+_bs_logged_in = False
+
+
+def _bs_login():
+    """确保 baostock 已登录（全局单连接）"""
+    global _bs_logged_in
+    if not _bs_logged_in:
+        lg = bs.login()
+        if lg.error_code == "0":
+            _bs_logged_in = True
+            logger.info("baostock 登录成功")
+        else:
+            logger.error(f"baostock 登录失败: {lg.error_msg}")
+
+
+def _to_bs_code(symbol: str) -> str:
+    """纯数字代码 → baostock 格式 (sz.002111 / sh.600519)"""
+    if symbol.startswith(("6", "5")):
+        return f"sh.{symbol}"
+    return f"sz.{symbol}"
 
 
 class MarketData:
@@ -61,7 +85,7 @@ class MarketData:
         adjust: str = "qfq",
     ) -> pd.DataFrame:
         """
-        获取个股/ETF 日K线数据
+        获取个股/ETF 日K线数据（baostock 主力 + AKShare fallback）
 
         Args:
             symbol: 股票或ETF代码（纯数字，如 "002111" 或 "512400"）
@@ -69,47 +93,57 @@ class MarketData:
             adjust: 复权方式 qfq=前复权, hfq=后复权, ""=不复权
 
         Returns:
-            DataFrame with columns: date, open, close, high, low, volume, turnover
+            DataFrame with columns: date, open, close, high, low, volume, pct_change
         """
-        end = datetime.now().strftime("%Y%m%d")
-        start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
+        # 优先用 baostock（快、无反爬）
+        try:
+            _bs_login()
+            bs_code = _to_bs_code(symbol)
+            start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
+            end = datetime.now().strftime("%Y-%m-%d")
+            # baostock 复权映射
+            adj_map = {"qfq": "2", "hfq": "1", "": "3"}
+            adj_flag = adj_map.get(adjust, "2")
 
+            rs = bs.query_history_k_data_plus(
+                bs_code,
+                "date,open,high,low,close,volume,pctChg",
+                start_date=start,
+                end_date=end,
+                frequency="d",
+                adjustflag=adj_flag,
+            )
+            rows = []
+            while (rs.error_code == "0") and rs.next():
+                rows.append(rs.get_row_data())
+
+            if rows:
+                df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume", "pct_change"])
+                for col in ["open", "high", "low", "close", "volume", "pct_change"]:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                df["date"] = pd.to_datetime(df["date"])
+                df = df.dropna(subset=["close"]).sort_values("date").tail(days).reset_index(drop=True)
+                return df
+        except Exception as e:
+            logger.warning(f"baostock {symbol} 失败, fallback AKShare: {e}")
+
+        # AKShare fallback
+        end_str = datetime.now().strftime("%Y%m%d")
+        start_str = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
         try:
             if self._is_etf(symbol):
-                df = ak.fund_etf_hist_em(
-                    symbol=symbol,
-                    period="daily",
-                    start_date=start,
-                    end_date=end,
-                    adjust=adjust,
-                )
+                df = ak.fund_etf_hist_em(symbol=symbol, period="daily", start_date=start_str, end_date=end_str, adjust=adjust)
             else:
-                df = ak.stock_zh_a_hist(
-                    symbol=symbol,
-                    period="daily",
-                    start_date=start,
-                    end_date=end,
-                    adjust=adjust,
-                )
-            # 统一列名
+                df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_str, end_date=end_str, adjust=adjust)
             df = df.rename(columns={
-                "日期": "date",
-                "开盘": "open",
-                "收盘": "close",
-                "最高": "high",
-                "最低": "low",
-                "成交量": "volume",
-                "成交额": "turnover",
-                "振幅": "amplitude",
-                "涨跌幅": "pct_change",
-                "涨跌额": "change",
-                "换手率": "turnover_rate",
+                "日期": "date", "开盘": "open", "收盘": "close", "最高": "high",
+                "最低": "low", "成交量": "volume", "涨跌幅": "pct_change",
             })
             df["date"] = pd.to_datetime(df["date"])
             df = df.sort_values("date").tail(days).reset_index(drop=True)
             return df
         except Exception as e:
-            logger.error(f"获取 {symbol} 日K线失败: {e}")
+            logger.error(f"获取 {symbol} 日K线失败 (baostock+AKShare): {e}")
             return pd.DataFrame()
 
     def get_stock_realtime(self, symbol: str) -> dict:
@@ -230,28 +264,42 @@ class MarketData:
 
     def get_index_daily(self, index_code: str = "000001", days: int = 120) -> pd.DataFrame:
         """
-        获取指数日K线（默认上证指数）
+        获取指数日K线（baostock 主力 + AKShare fallback）
 
         Args:
             index_code: 指数代码（000001=上证, 399001=深证, 399006=创业板）
         """
-        end = datetime.now().strftime("%Y%m%d")
-        start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
-
+        # baostock
         try:
-            df = ak.stock_zh_index_daily_em(symbol=f"sh{index_code}" if index_code.startswith("0") else f"sz{index_code}")
-            df = df.rename(columns={
-                "date": "date",
-                "open": "open",
-                "close": "close",
-                "high": "high",
-                "low": "low",
-                "volume": "volume",
-            })
+            _bs_login()
+            bs_code = _to_bs_code(index_code)
+            start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
+            end = datetime.now().strftime("%Y-%m-%d")
+            rs = bs.query_history_k_data_plus(
+                bs_code, "date,open,high,low,close,volume,pctChg",
+                start_date=start, end_date=end, frequency="d",
+            )
+            rows = []
+            while (rs.error_code == "0") and rs.next():
+                rows.append(rs.get_row_data())
+            if rows:
+                df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume", "pct_change"])
+                for col in ["open", "high", "low", "close", "volume", "pct_change"]:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                df["date"] = pd.to_datetime(df["date"])
+                return df.tail(days).reset_index(drop=True)
+        except Exception as e:
+            logger.warning(f"baostock 指数 {index_code} 失败, fallback AKShare: {e}")
+
+        # AKShare fallback
+        try:
+            prefix = "sh" if index_code.startswith("0") else "sz"
+            df = ak.stock_zh_index_daily_em(symbol=f"{prefix}{index_code}")
+            df = df.rename(columns={"date": "date", "open": "open", "close": "close", "high": "high", "low": "low", "volume": "volume"})
             df["date"] = pd.to_datetime(df["date"])
             return df.tail(days).reset_index(drop=True)
         except Exception as e:
-            logger.error(f"获取指数 {index_code} 失败: {e}")
+            logger.error(f"获取指数 {index_code} 失败 (baostock+AKShare): {e}")
             return pd.DataFrame()
 
     # ========================

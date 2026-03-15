@@ -222,16 +222,14 @@ def _run_scan_warmup():
 
     all_symbols = pool["holdings"] + pool["watchlist"] + pool["hot"]
     results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_sym = {executor.submit(_score_one, sym): sym for sym in all_symbols}
-        for future in concurrent.futures.as_completed(future_to_sym, timeout=120):
-            sym = future_to_sym[future]
-            try:
-                r = future.result(timeout=10)
-                if r:
-                    results[sym] = r
-            except Exception:
-                pass
+    # baostock 是单连接串行，不用 ThreadPoolExecutor（更快更稳）
+    for sym in all_symbols:
+        try:
+            r = _score_one(sym)
+            if r:
+                results[sym] = r
+        except Exception:
+            pass
 
     holding_results = [results[s] for s in pool["holdings"] if s in results]
     watchlist_results = [results[s] for s in pool["watchlist"] if s in results]
