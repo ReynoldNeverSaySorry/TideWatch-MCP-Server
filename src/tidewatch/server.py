@@ -175,6 +175,7 @@ def _run_scan_warmup():
     """执行 scan_market 的核心逻辑，填充 _scan_cache"""
     pool = get_scan_pool()
     holdings_info = {h["symbol"]: h for h in get_holdings()}
+    watchlist_info = {w["symbol"]: w for w in get_watchlist()}
 
     from .technical import TechnicalAnalyzer
     tech_analyzer = TechnicalAnalyzer()
@@ -201,8 +202,11 @@ def _run_scan_warmup():
             pct_col = "pct_change" if "pct_change" in daily.columns else "涨跌幅"
             pct_today = float(daily.iloc[-1].get(pct_col, 0))
             stored_name = holdings_info.get(code, {}).get("name", "")
+            watchlist_name = watchlist_info.get(code, {}).get("name", "")
             if stored_name and stored_name != code:
                 name = stored_name
+            elif watchlist_name and watchlist_name != code:
+                name = watchlist_name
             elif code in HOT_NAMES:
                 name = HOT_NAMES[code]
             else:
@@ -1038,6 +1042,7 @@ def _scan_market_sync(top_n: int):
     """scan_market 的同步实现，在线程池中执行"""
     pool = get_scan_pool()
     holdings_info = {h["symbol"]: h for h in get_holdings()}
+    watchlist_info = {w["symbol"]: w for w in get_watchlist()}
 
     # 拉一次体制调整，所有股票共用
     try:
@@ -1062,8 +1067,11 @@ def _scan_market_sync(top_n: int):
             pct_today = float(latest_row.get("pct_change", latest_row.get("涨跌幅", 0)))
             # 优先用持仓/自选中存的名称，然后查 HOT_NAMES，fallback 到 get_stock_name
             stored_name = holdings_info.get(code, {}).get("name", "")
+            watchlist_name = watchlist_info.get(code, {}).get("name", "")
             if stored_name and stored_name != code:
                 name = stored_name
+            elif watchlist_name and watchlist_name != code:
+                name = watchlist_name
             elif code in HOT_NAMES:
                 name = HOT_NAMES[code]
             else:
