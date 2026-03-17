@@ -176,7 +176,8 @@ class MarketData:
         """
         # 优先用 baostock（快、无反爬），线程锁保护单连接
         try:
-            if not _bs_lock.acquire(timeout=15):
+            acquired = _bs_lock.acquire(timeout=15)
+            if not acquired:
                 raise TimeoutError("baostock lock acquire timeout")
             try:
                 _bs_login()
@@ -356,7 +357,8 @@ class MarketData:
         """
         # baostock（线程锁保护单连接）
         try:
-            if not _bs_lock.acquire(timeout=15):
+            acquired = _bs_lock.acquire(timeout=15)
+            if not acquired:
                 raise TimeoutError("baostock lock acquire timeout")
             try:
                 _bs_login()
