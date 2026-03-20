@@ -827,6 +827,7 @@ async def review_signals(days: int = 30, symbol: str = "", limit: int = 200):
         entry = {
             "id": s["id"],
             "date": s["timestamp"][:10],
+            "time": s["timestamp"][11:16],  # HH:MM
             "symbol": s["symbol"],
             "name": s["name"],
             "direction": s["direction"],
