@@ -129,7 +129,7 @@ TideWatch-MCP-Server/
   - 历史重复数据清理（60→29条）+ 回填按钮一键触发
 - [ ] 盘前播报 v1 — cron + Telegram Bot，每日 9:15 推送持仓+体制+异动 (目标: 下周)
   - 内嵌体制切换告警（bull→volatile 等状态跃迁，比涨跌更值得推送）
-- [x] 美股支持 — yfinance 数据源 + 市场路由 + SPY 体制识别 (2026-03-20)
+- [x] 美股支持 — yfinance 数据源 + 市场路由 + SPY 体制识别 (2026-03-20) 🦞 9/10
   - `is_us_stock()` 自动识别（字母=美股，数字=A股）
   - yfinance K线接入（免费、零反爬、全球市场），`start` 参数替代 `period`（精确控制范围）
   - 美股资金流/新闻/北向等 A 股特色接口返回空（graceful fallback）
