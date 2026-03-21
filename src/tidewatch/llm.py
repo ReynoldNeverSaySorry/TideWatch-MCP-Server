@@ -45,6 +45,7 @@ def polish_narrative(
     is_us: bool = False,
     news: list = None,
     lhb: list = None,
+    data_summary: str = "",
 ) -> str:
     """
     用 LLM 润色模板叙事
@@ -100,22 +101,32 @@ def polish_narrative(
         if lhb_lines:
             lhb_section = f"\n龙虎榜（近期上榜）：\n" + "\n".join(lhb_lines) + "\n龙虎榜反映机构/游资动向，请结合技术面判断主力意图。\n"
 
+    # 结构化数据摘要（如有）
+    data_section = ""
+    if data_summary:
+        data_section = f"""
+结构化数据：
+{data_summary}
+请基于以上数据做独立判断，不要只改写模板叙事的措辞。如果数据之间有矛盾（如技术面看空但估值便宜），请明确指出。
+"""
+
     prompt = f"""你是一位经验丰富的{market_role}，正在和朋友聊投资。
-请将以下分析报告润色为更自然、更有"聊天感"的短评。
+请基于以下数据和分析，输出一段自然的、有"聊天感"的投资短评。
 
 要求：
-- 保持所有数据和结论不变（评分、方向、价位等）
-- 语气要像在微信群里给朋友分享观点，不要太正式
-- 如果有矛盾信号或警告，要突出强调
-- 如果有用户持仓信息，结合持仓成本和浮盈做出具体的操作建议
+- 基于结构化数据做独立交叉验证，不要只改写模板叙事
+- 语气像在微信群里给朋友分享观点，不要太正式
+- 如果数据之间有矛盾（技术vs基本面、资金vs价格），要重点分析
+- 如果有冲突信号或护栏警告，必须突出强调
+- 如果有用户持仓信息，结合持仓成本和浮盈做出具体操作建议
 {market_rules}
-- 控制在 250 字以内
+- 控制在 300 字以内
 - 不要加任何标题或格式标记，纯文本即可
 
 股票：{stock_name}
 综合评分：{score:+d}
-{portfolio_section}{news_section}{lhb_section}
-原始分析：
+{data_section}{portfolio_section}{news_section}{lhb_section}
+模板分析（供参考，不要照搬）：
 {template_narrative}"""
 
     try:

@@ -522,12 +522,35 @@ def _analyze_stock_sync(symbol, include_news, include_money_flow, days, skip_llm
 
     # 9. LLM 叙事润色（可选，失败时保留模板叙事）
     if not skip_llm:
+        # 构建结构化数据摘要供 LLM 独立判断
+        _vol = tech.get("volume", {})
+        _mom = tech.get("momentum", {})
+        _ma = tech.get("ma", {})
+        _pos = tech.get("price_position", {})
+        _boll = tech.get("volatility", {})
+        summary_lines = [
+            f"方向: {final_signal} | 综合评分: {adjusted_score:+d} (原始{raw_score:+d}, 体制调整{regime_adj['signal_bias']:+d})",
+            f"价格: {realtime['price']:.2f} | 5日涨跌: {_pos.get('pct_5d', 0):+.1f}% | 20日位置: {_pos.get('position_20d', 50):.0f}%",
+            f"均线: {'多头排列' if _ma.get('bullish_aligned') else '空头排列' if _ma.get('bearish_aligned') else '交织'} | MA5偏离: {_ma.get('price_vs_ma5', 0):+.1f}% | MA20偏离: {_ma.get('price_vs_ma20', 0):+.1f}%",
+            f"动量: RSI {_mom.get('rsi_14', 50):.0f} | MACD {'金叉' if _mom.get('macd_cross') == 'golden' else '死叉' if _mom.get('macd_cross') == 'death' else '无交叉'}",
+            f"量能: 量比 {_vol.get('volume_ratio', 1):.1f}x | OBV斜率 {_vol.get('obv_slope', 0):.3f} | 换手率 {_vol.get('turn_rate', 0):.1f}% (5日均 {_vol.get('avg_turn_5d', 0):.1f}%)",
+        ]
+        if realtime.get("pe", 0) > 0:
+            summary_lines.append(f"估值: PE(TTM) {realtime['pe']:.1f} | PB(MRQ) {realtime['pb']:.2f}")
+        summary_lines.append(f"布林: 位置 {_boll.get('boll_position', 50):.0f}% | ATR {_boll.get('atr_14', 0):.2f}")
+        summary_lines.append(f"体制: {regime_result.get('description', '')} | 建议仓位 ≤{regime_adj['position_max'] * 100:.0f}%")
+        if conflicts:
+            conflict_descs = [c.get("description", "") for c in conflicts]
+            summary_lines.append(f"冲突: {' | '.join(conflict_descs)}")
+        data_summary = "\n".join(summary_lines)
+
         try:
             report["narrative"] = polish_narrative(
                 report["narrative"], stock_name, adjusted_score,
                 portfolio_context=portfolio_ctx,
                 is_us=_is_us,
                 news=news,
+                data_summary=data_summary,
             )
         except Exception as e:
             logger.debug(f"LLM 润色跳过: {e}")
