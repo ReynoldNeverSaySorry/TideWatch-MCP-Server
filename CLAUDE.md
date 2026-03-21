@@ -142,6 +142,15 @@ TideWatch-MCP-Server/
   - TODO: SPY 自分析时 regime 会自引用（无 market context）
   - Dashboard 美股适配 🦞 9.5/10：`isUSCode()`/`cur()`/`displayName()` 三件套，8处币种 ¥→$ + ticker主标题 + 混合币种摘要栏
 - [ ] 回测引擎 v1 — baostock 历史数据 + TideWatch 信号策略回测 vs 沪深300 (目标: 九坤面试前)
+- [ ] 数据增强 T1 — 把已有存货接进主分析流 (目标: 3/22-23 周末)
+  - T1-1: 龙虎榜接入 `_analyze_stock_sync`（`get_lhb()` 已写好没调，~10行 server.py）
+  - T1-2: 新闻摘要喂给 LLM prompt（`news` 已拉回没传给 llm.py，~15行）
+  - T1-3: 美股新闻用 `yf.Ticker.news`（当前 `_skip_news=True` 全跳过，~20行 data.py）
+- [ ] 数据增强 T2 — 补核心短板 (目标: 下周)
+  - T2-1: 基本面 PE/PB/ROE（baostock `query_profit_data`，最大缺口，~60行）
+  - T2-2: 换手率 `turn` 字段（baostock K线加列，与量比+OBV 三角交叉验证，~10行）
+  - T2-3: LLM 结构化输入（传评分+各维度关键数字+冲突列表，从"润色"升级为"半分析"，~30行）
+  - T2-4: 北向资金注入个股分析上下文（~15行 server.py）
 
 ### 冰箱（Icebox）— 条件成熟再做
 - 产业链图谱（HOT_POOL 按板块组织已部分覆盖）
