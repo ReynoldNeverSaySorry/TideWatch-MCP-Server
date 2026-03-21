@@ -211,12 +211,17 @@ class MarketData:
             raw_news = ticker.news or []
             news_list = []
             for item in raw_news[:limit]:
-                news_list.append({
-                    "title": item.get("title", ""),
-                    "source": item.get("publisher", ""),
-                    "time": "",
-                    "content": "",
-                })
+                # yfinance 新版: title 在 content.title 里
+                content = item.get("content", {}) if isinstance(item.get("content"), dict) else {}
+                title = content.get("title") or item.get("title", "")
+                publisher = (content.get("provider", {}) or {}).get("displayName") or item.get("publisher", "")
+                if title:
+                    news_list.append({
+                        "title": title,
+                        "source": publisher,
+                        "time": content.get("pubDate", ""),
+                        "content": (content.get("summary") or "")[:200],
+                    })
             return news_list
         except Exception as e:
             logger.warning(f"yfinance {symbol} 新闻获取失败: {e}")
