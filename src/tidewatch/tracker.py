@@ -207,6 +207,23 @@ def update_outcomes(market_data) -> dict[str, Any]:
     updated = {"5d": 0, "10d": 0, "20d": 0, "errors": 0}
 
     try:
+        # 快速前置检查：最早的未回填信号是否有足够的交易日
+        oldest_pending = conn.execute(
+            """SELECT MIN(timestamp) FROM signals 
+               WHERE price_5d IS NULL AND price_at_signal IS NOT NULL AND price_at_signal > 0"""
+        ).fetchone()[0]
+
+        if oldest_pending:
+            oldest_date = datetime.fromisoformat(oldest_pending)
+            cal_days = (datetime.now() - oldest_date).days
+            # 日历天 < 7 时不可能有 5 个交易日（考虑周末），快速返回
+            if cal_days < 7:
+                return {
+                    **updated,
+                    "message": f"回填跳过: 最早待回填信号距今{cal_days}天，交易日不足5天，请工作日盘后再试",
+                    "skipped": True,
+                }
+
         # 获取所有有待回填的信号
         pending = conn.execute(
             """SELECT id, symbol, timestamp, score, direction, price_at_signal,
@@ -224,6 +241,10 @@ def update_outcomes(market_data) -> dict[str, Any]:
             score = row["score"]
 
             if price_at is None or price_at == 0:
+                continue
+
+            # 日历天不足 7 天的信号跳过（不可能有 5 个交易日）
+            if days_elapsed < 7 and row["price_5d"] is None:
                 continue
 
             try:
