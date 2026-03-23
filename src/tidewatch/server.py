@@ -566,7 +566,7 @@ def _analyze_stock_sync(symbol, include_news, include_money_flow, days, skip_llm
 
     # 10. 行为护栏检测
     try:
-        guardrail_warnings = check_guardrails(symbol, tech)
+        guardrail_warnings = check_guardrails(symbol, tech, score=adjusted_score, conflicts=conflicts)
         if guardrail_warnings:
             report["guardrails"] = guardrail_warnings
             # 护栏警告也加入叙事末尾

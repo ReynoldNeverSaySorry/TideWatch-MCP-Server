@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 def check_guardrails(
     symbol: str,
     tech: dict[str, Any],
+    score: int = 0,
+    conflicts: list[dict] | None = None,
 ) -> list[dict[str, str]]:
     """
     检查行为护栏，返回警告列表
@@ -22,6 +24,8 @@ def check_guardrails(
     Args:
         symbol: 当前分析的股票代码
         tech: 技术分析结果
+        score: 调整后综合评分 (adjusted_score)
+        conflicts: 冲突检测结果列表
 
     Returns:
         警告列表，每条包含 type, severity, message, advice
@@ -40,6 +44,11 @@ def check_guardrails(
 
     # 规则 3: 连续看空还在问
     w = _check_repeated_bearish(symbol)
+    if w:
+        warnings.append(w)
+
+    # 规则 4: 冲突+低分 = 不交易
+    w = _check_conflict_low_score(score, conflicts)
     if w:
         warnings.append(w)
 
@@ -84,6 +93,23 @@ def _check_frequency() -> dict | None:
     except Exception as e:
         logger.warning(f"频次检测失败: {e}")
     return None
+
+
+def _check_conflict_low_score(score: int, conflicts: list[dict] | None) -> dict | None:
+    """冲突+低分检测：有矛盾信号且评分绝对值<50时，历史数据表明胜率极低"""
+    if not conflicts:
+        return None
+    abs_score = abs(score)
+    if abs_score >= 50:
+        return None
+    conflict_descs = [c.get("description", "") for c in conflicts]
+    conflict_text = "；".join(conflict_descs)
+    return {
+        "type": "conflict_low_conviction",
+        "severity": "high",
+        "message": f"⚠️ 信号矛盾 + 低置信度：评分仅 {score:+d}（|{abs_score}| < 50）且存在矛盾信号（{conflict_text}）。历史回测显示此类信号胜率显著低于平均水平。",
+        "advice": "多空拉锯且系统没有明确倾向，建议观望。等评分绝对值 > 50 或冲突消除后再考虑操作。",
+    }
 
 
 def _check_repeated_bearish(symbol: str) -> dict | None:
