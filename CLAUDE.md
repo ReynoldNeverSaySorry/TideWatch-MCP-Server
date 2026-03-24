@@ -248,3 +248,4 @@ tidewatch.polly.wang:443 (Nginx + Let's Encrypt SSL)
 - baostock socket 三层超时保护（🦞9.0/10）：monkey-patch `connect()` 注入 10s `settimeout` → `_bs_login()` 登录后双保险 `settimeout` → 异常统一走 `_force_close_bs_socket()` 关 socket + 标记 session 失效。根治僵尸 TCP 卡死进程问题
 - Dashboard 自动刷新仅在盘中 + 可见标签 + 无详情面板时触发（智能三重守卫）
 - **数据库在远程 Azure VM 上** — `data/signals.db` 本地仅空库，排查持仓/自选/信号问题必须 SSH 到 Azure VM 查询
+- scan_market 级联失败保护（3+ A 股连续失败 → 暂停重连 baostock）+ 持仓/自选 A 股全缺失时末尾重试一轮，避免瞬时故障导致关键股票丢失

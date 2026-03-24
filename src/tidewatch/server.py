@@ -383,15 +383,17 @@ def _analyze_stock_sync(symbol, include_news, include_money_flow, days, skip_llm
     _skip_money = _is_us or is_etf or not include_money_flow
     _skip_news = is_etf or not include_news  # 美股也拉新闻（yfinance）
     _skip_lhb = _is_us or is_etf  # 龙虎榜仅 A 股非 ETF
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        f_daily = executor.submit(market_data.get_stock_daily, symbol, days)
-        f_index = executor.submit(market_data.get_index_daily, index_code, days)
-        f_money = executor.submit(market_data.get_money_flow, symbol) if not _skip_money else None
-        f_news = executor.submit(market_data.get_stock_news, symbol, 5) if not _skip_news else None
-        f_lhb = executor.submit(market_data.get_lhb, symbol) if not _skip_lhb else None
+    # 不用 with（shutdown(wait=True) 会等所有 future，AKShare 挂住会拖死整个分析）
+    _executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+    f_daily = _executor.submit(market_data.get_stock_daily, symbol, days)
+    f_index = _executor.submit(market_data.get_index_daily, index_code, days)
+    f_money = _executor.submit(market_data.get_money_flow, symbol) if not _skip_money else None
+    f_news = _executor.submit(market_data.get_stock_news, symbol, 5) if not _skip_news else None
+    f_lhb = _executor.submit(market_data.get_lhb, symbol) if not _skip_lhb else None
+    _executor.shutdown(wait=False)  # 不阻塞，各 future 独立完成
 
-    # 1. 日K线（核心数据源，必须成功）
-    df = f_daily.result()
+    # 1. 日K线（核心数据源，必须成功）— baostock ~0.3s
+    df = f_daily.result(timeout=30)
     t1 = _time.monotonic()
     logger.info(f"⏱️ {symbol} 数据拉取: {t1-t0:.1f}s")
     if df.empty:
@@ -420,13 +422,19 @@ def _analyze_stock_sync(symbol, include_news, include_money_flow, days, skip_llm
         "pe": round(pe_val, 2), "pb": round(pb_val, 2), "total_mv": 0,
     }
 
-    # 3. 市场体制（已并发拉取）
-    index_df = f_index.result()
+    # 3. 市场体制（已并发拉取）— baostock ~0.3s
+    index_df = f_index.result(timeout=30)
     regime_result = regime_detector.detect(index_df)
     regime_adj = regime_detector.get_regime_adjustment(regime_result["regime"])
 
-    # 4. 资金面（已并发拉取）/ 美股用 SPY 相对强弱替代
-    money = f_money.result() if f_money else {}
+    # 4. 资金面（已并发拉取）/ 美股用 SPY 相对强弱替代 — AKShare 15s 超时
+    money = {}
+    if f_money:
+        try:
+            money = f_money.result(timeout=15)
+        except (concurrent.futures.TimeoutError, Exception) as e:
+            logger.warning(f"⏱️ {symbol} 资金流向超时/失败: {e}")
+            money = {}
     if _is_us and not money and not index_df.empty and len(index_df) >= 5:
         spy_pct_5d = (float(index_df.iloc[-1]["close"]) / float(index_df.iloc[-5]["close"]) - 1) * 100
         stock_pct_5d = tech.get("price_position", {}).get("pct_5d", 0)
@@ -436,11 +444,23 @@ def _analyze_stock_sync(symbol, include_news, include_money_flow, days, skip_llm
             "relative": round(stock_pct_5d - spy_pct_5d, 2),
         }
 
-    # 5. 消息面（已并发拉取）
-    news = f_news.result() if f_news else []
+    # 5. 消息面（已并发拉取）— AKShare/yfinance 15s 超时
+    news = []
+    if f_news:
+        try:
+            news = f_news.result(timeout=15)
+        except (concurrent.futures.TimeoutError, Exception) as e:
+            logger.warning(f"⏱️ {symbol} 新闻超时/失败: {e}")
+            news = []
 
-    # 6. 龙虎榜（已并发拉取，仅 A 股非 ETF）
-    lhb = f_lhb.result() if f_lhb else []
+    # 6. 龙虎榜（已并发拉取，仅 A 股非 ETF）— AKShare 15s 超时
+    lhb = []
+    if f_lhb:
+        try:
+            lhb = f_lhb.result(timeout=15)
+        except (concurrent.futures.TimeoutError, Exception) as e:
+            logger.warning(f"⏱️ {symbol} 龙虎榜超时/失败: {e}")
+            lhb = []
 
     t2 = _time.monotonic()
     logger.info(f"⏱️ {symbol} 分析+体制+资金+新闻: {t2-t1:.1f}s (总 {t2-t0:.1f}s)")
