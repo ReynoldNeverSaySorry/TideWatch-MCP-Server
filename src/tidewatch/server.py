@@ -1194,15 +1194,66 @@ def _scan_market_sync(top_n: int):
     # 串行扫描（baostock 单连接 + 每只yield锁给 analyze_stock）
     all_symbols = pool["holdings"] + pool["watchlist"] + pool["hot"]
     results = {}
+    consecutive_failures = 0
 
     for sym in all_symbols:
         try:
             r = _score_stock(sym)
             if r:
                 results[sym] = r
+                consecutive_failures = 0
+            else:
+                # 仅对 A 股计数（美股走 yfinance，不受 baostock 影响）
+                if not is_us_stock(str(sym)):
+                    consecutive_failures += 1
         except Exception:
-            pass
+            if not is_us_stock(str(sym)):
+                consecutive_failures += 1
+
+        # 级联失败检测：连续 3+ A 股失败 → 暂停重连 baostock
+        if consecutive_failures >= 3:
+            logger.warning(f"⚠️ 扫描级联失败: 连续 {consecutive_failures} 只 A 股失败，强制重连 baostock")
+            try:
+                from .data import _force_close_bs_socket, _bs_login, _bs_lock
+                if _bs_lock.acquire(timeout=10):
+                    try:
+                        _force_close_bs_socket()
+                        _time.sleep(1)  # 等 baostock 服务端就绪
+                        _bs_login()
+                        logger.info("⚠️ baostock 重连成功，继续扫描")
+                    finally:
+                        _bs_lock.release()
+            except Exception as e:
+                logger.error(f"⚠️ baostock 重连失败: {e}")
+            consecutive_failures = 0
+
         _time.sleep(0.05)  # 让出锁给 analyze_stock 请求
+
+    # 持仓/自选末尾重试：如果关键股票全部缺失，重连后补一轮
+    critical_symbols = pool["holdings"] + pool["watchlist"]
+    missing_critical = [s for s in critical_symbols if s not in results and not is_us_stock(str(s))]
+    if missing_critical and len(missing_critical) == len([s for s in critical_symbols if not is_us_stock(str(s))]):
+        logger.warning(f"🔄 持仓/自选 A 股全部缺失({len(missing_critical)}只)，末尾重试")
+        try:
+            from .data import _force_close_bs_socket, _bs_login, _bs_lock
+            if _bs_lock.acquire(timeout=10):
+                try:
+                    _force_close_bs_socket()
+                    _time.sleep(2)
+                    _bs_login()
+                finally:
+                    _bs_lock.release()
+            for sym in missing_critical:
+                try:
+                    r = _score_stock(sym)
+                    if r:
+                        results[sym] = r
+                        logger.info(f"🔄 重试成功: {sym}")
+                except Exception:
+                    pass
+                _time.sleep(0.05)
+        except Exception as e:
+            logger.error(f"🔄 末尾重试失败: {e}")
 
     # 分组输出
     holding_results = [results[s] for s in pool["holdings"] if s in results]

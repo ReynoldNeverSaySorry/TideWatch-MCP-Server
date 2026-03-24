@@ -125,6 +125,7 @@ def bs_heartbeat() -> bool:
             )
             if rs.error_code != "0":
                 raise RuntimeError(f"query failed: {rs.error_msg}")
+            logger.debug("💓 baostock heartbeat: OK")
             return True
         finally:
             _bs_lock.release()

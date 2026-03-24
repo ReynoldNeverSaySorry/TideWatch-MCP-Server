@@ -13,6 +13,10 @@ cd X-Workspace/TideWatch-MCP-Server
 poetry install              # 安装依赖
 poetry run tidewatch        # 本地模式 (stdio)
 poetry run tidewatch --http --port 8889  # 远程模式 (HTTP)
+
+# 冒烟测试（每次改完必跑）
+poetry run python tests/smoke_test.py --quick   # 快速 ~40s, 9个核心工具
+poetry run python tests/smoke_test.py           # 完整 ~3min, 14个全量工具
 ```
 
 ## Architecture
@@ -40,11 +44,16 @@ TideWatch-MCP-Server/
 ├── scripts/                # 部署脚本
 │   ├── setup_domain.sh     # DNS + Nginx + SSL 一键配置
 │   └── tidewatch.service   # systemd 服务文件
-└── data/                   # 运行时数据 (git-ignored)
-    └── signals.db          # 信号追踪数据库
+└── data/                   # 运行时数据 (git-ignored, 仅 Azure VM 上有实际数据)
+    └── signals.db          # 信号追踪数据库 (持仓/自选/账户/信号全在远程 VM)
 ```
 
 注意：Phase 1-4 全部完成，Phase 5 前两项（信号回填 + 复盘看板）已完成。Dashboard 本地维护（`static/tidewatch.html`），不走 git push。HOT_POOL 已从 76 只精简至 24 只（8板块×3龙头），扫描耗时从 ~22s 降至 ~4.25s。
+
+**⚠️ 数据库在远程 Azure VM 上**：`data/signals.db`（含持仓、自选、账户资金、信号记录）只在 Azure VM 有实际数据，本地仅有空库。排查数据问题时必须 SSH 到远程查询：
+```bash
+ssh -F ssh.config Azure-Server "sqlite3 ~/GitHub_Workspace/TideWatch-MCP-Server/data/signals.db 'SELECT * FROM holdings;'"
+```
 
 ## MCP Tools
 
@@ -238,3 +247,4 @@ tidewatch.polly.wang:443 (Nginx + Let's Encrypt SSL)
 - baostock 单连接 + `threading.Lock(acquire timeout=15s)` 保护线程安全 + 30s 自动重连
 - baostock socket 三层超时保护（🦞9.0/10）：monkey-patch `connect()` 注入 10s `settimeout` → `_bs_login()` 登录后双保险 `settimeout` → 异常统一走 `_force_close_bs_socket()` 关 socket + 标记 session 失效。根治僵尸 TCP 卡死进程问题
 - Dashboard 自动刷新仅在盘中 + 可见标签 + 无详情面板时触发（智能三重守卫）
+- **数据库在远程 Azure VM 上** — `data/signals.db` 本地仅空库，排查持仓/自选/信号问题必须 SSH 到 Azure VM 查询
