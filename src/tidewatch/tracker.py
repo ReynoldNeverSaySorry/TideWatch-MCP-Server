@@ -213,6 +213,26 @@ def update_outcomes(market_data) -> dict[str, Any]:
     updated = {"5d": 0, "10d": 0, "20d": 0, "errors": 0}
 
     try:
+        # ── Layer 1: 非交易日快速跳过 ──
+        # 周末 A 股休市 + baostock 服务端不响应，直接 skip 避免卡死
+        now = _now_bj()
+        weekday = now.weekday()  # 0=Mon ... 6=Sun
+        if weekday >= 5:
+            return {
+                **updated,
+                "message": f"非交易日（{'周六' if weekday == 5 else '周日'}），跳过回填",
+                "skipped": True,
+            }
+
+        # 盘中也不回填（9:15~15:30 期间数据不稳定），盘后才有意义
+        hour = now.hour
+        if 9 <= hour < 16:
+            return {
+                **updated,
+                "message": f"盘中时段（{hour}:xx），建议收盘后回填",
+                "skipped": True,
+            }
+
         # 快速前置检查：最早的未回填信号是否有足够的交易日
         oldest_pending = conn.execute(
             """SELECT MIN(timestamp) FROM signals 
@@ -221,7 +241,7 @@ def update_outcomes(market_data) -> dict[str, Any]:
 
         if oldest_pending:
             oldest_date = datetime.fromisoformat(oldest_pending)
-            cal_days = (_now_bj() - oldest_date).days
+            cal_days = (now - oldest_date).days
             # 日历天 < 6 时不可能有 5 个交易日（最短：周一信号→下周一回填=7天，但周内信号可能 6 天就够）
             if cal_days < 6:
                 return {
@@ -239,9 +259,46 @@ def update_outcomes(market_data) -> dict[str, Any]:
                ORDER BY timestamp ASC"""
         ).fetchall()
 
+        # ── Layer 2: 按 symbol 缓存 K 线，避免重复查询 ──
+        # 68 条信号可能只有 11 个不同 symbol，每个只查一次
+        from .data import get_stock_daily_for_backfill
+        _kline_cache: dict[str, Any] = {}  # {(symbol, days): df}
+
+        def _get_kline_cached(symbol: str, days: int):
+            """缓存 K 线查询，同 symbol 取最大 days 的缓存"""
+            # 查找是否已有该 symbol 的缓存（取 days 最大的）
+            for (cached_sym, cached_days), cached_df in _kline_cache.items():
+                if cached_sym == symbol and cached_days >= days:
+                    return cached_df
+            # 没缓存，查询并存入
+            df = get_stock_daily_for_backfill(symbol, days=days)
+            _kline_cache[(symbol, days)] = df
+            return df
+
+        # 预计算每个 symbol 需要的最大 days，一次查询覆盖所有信号
+        symbol_max_days: dict[str, int] = {}
+        for row in pending:
+            symbol = row["symbol"]
+            signal_date = datetime.fromisoformat(row["timestamp"])
+            days_elapsed = (now - signal_date).days
+            needed = days_elapsed + 5
+            if symbol not in symbol_max_days or needed > symbol_max_days[symbol]:
+                symbol_max_days[symbol] = needed
+
+        # 预热缓存：每个 symbol 只查一次（最大时间范围）
+        for symbol, max_days in symbol_max_days.items():
+            try:
+                _kline_cache[(symbol, max_days)] = get_stock_daily_for_backfill(symbol, days=max_days)
+            except Exception as e:
+                logger.warning(f"预热缓存 {symbol} 失败: {e}")
+            import time as _time
+            _time.sleep(0.05)  # 让出 baostock 锁
+
+        logger.info(f"📦 K 线缓存预热完成: {len(symbol_max_days)} 个 symbol（{len(pending)} 条信号）")
+
         for row in pending:
             signal_date = datetime.fromisoformat(row["timestamp"])
-            days_elapsed = (_now_bj() - signal_date).days
+            days_elapsed = (now - signal_date).days
             symbol = row["symbol"]
             price_at = row["price_at_signal"]
             score = row["score"]
@@ -254,9 +311,8 @@ def update_outcomes(market_data) -> dict[str, Any]:
                 continue
 
             try:
-                from .data import get_stock_daily_for_backfill
-                df = get_stock_daily_for_backfill(symbol, days=days_elapsed + 5)
-                if df.empty:
+                df = _get_kline_cached(symbol, days=days_elapsed + 5)
+                if df is None or df.empty:
                     continue
 
                 # 找信号日期之后的第N个交易日
@@ -307,9 +363,6 @@ def update_outcomes(market_data) -> dict[str, Any]:
             except Exception as e:
                 logger.warning(f"回填 {symbol} #{row['id']} 失败: {e}")
                 updated["errors"] += 1
-
-            import time as _time
-            _time.sleep(0.05)  # 让出 baostock 锁给 analyze_stock
 
         conn.commit()
         logger.info(f"📊 信号回填完成: 5d={updated['5d']}, 10d={updated['10d']}, 20d={updated['20d']}")
