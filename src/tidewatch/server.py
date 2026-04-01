@@ -47,6 +47,10 @@ _BJ_TZ = timezone(timedelta(hours=8))
 
 def _now_bj():
     return datetime.now(_BJ_TZ)
+
+# analyze_stock 盘后缓存：{"symbol:YYYY-MM-DD": report}，同一股票同一交易日盘后只算一次
+_analyze_cache: dict[str, Any] = {}
+_analyze_cache_date: str = ""  # 当前缓存的交易日，新交易日自动清空
 from typing import Any
 
 import pandas as pd
@@ -418,7 +422,24 @@ async def analyze_stock(
 
 
 def _analyze_stock_sync(symbol, include_news, include_money_flow, days, skip_llm):
+    global _analyze_cache, _analyze_cache_date
     t0 = _time.monotonic()
+
+    # 盘后缓存：A股 15:05+ 或美股非交易时段，同一股票同一交易日复用上次结果
+    now = _now_bj()
+    today_str = now.strftime("%Y-%m-%d")
+    is_market_closed = now.hour >= 15 or now.hour < 9 or now.weekday() >= 5
+    cache_key = f"{symbol}:{today_str}"
+
+    # 新交易日清空旧缓存
+    if _analyze_cache_date != today_str:
+        _analyze_cache.clear()
+        _analyze_cache_date = today_str
+
+    # 盘后 + 非 skip_llm + 缓存命中 → 直接返回
+    if is_market_closed and not skip_llm and cache_key in _analyze_cache:
+        logger.info(f"📦 {symbol} 盘后缓存命中，0 LLM 调用")
+        return _analyze_cache[cache_key]
     # baostock 每次查询都 auto-reconnect，无需等预热
 
     # ETF 检测（纯前缀判断，无网络请求）
@@ -671,6 +692,11 @@ def _analyze_stock_sync(symbol, include_news, include_money_flow, days, skip_llm
 
     t3 = _time.monotonic()
     logger.info(f"⏱️ {symbol} 分析完成: 总耗时 {t3-t0:.1f}s (数据{t1-t0:.1f}s + 分析{t2-t1:.1f}s + 其他{t3-t2:.1f}s)")
+
+    # 盘后写入缓存（仅完整分析，非 skip_llm）
+    if is_market_closed and not skip_llm:
+        _analyze_cache[cache_key] = report
+        logger.info(f"📦 {symbol} 盘后缓存已写入")
 
     return report
 
