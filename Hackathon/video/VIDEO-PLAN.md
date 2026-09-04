@@ -1,4 +1,4 @@
-# TideWatch Hackathon 视频方案 v0.1
+# TideWatch Hackathon 视频方案 v0.2
 
 > **TideWatch**
 > **Born to Predict. Taught by the Tide.**
@@ -43,9 +43,9 @@
 | 1 | 0:04-0:15 | 多个 AI 结论卡片快速出现：BUY、SELL、87% CONFIDENT，随后像退潮一样消失。 | Most AI systems make a prediction, then move on. The answer remains. The lesson disappears. | 大多数 AI 做出预测，然后继续向前。答案留下，教训却消失了。 | 主题铺垫 |
 | 2 | 0:15-0:25 | TideWatch Dashboard 从黑暗中浮现；技术、资金、消息、市场体制四条数据流汇入。 | TideWatch was born to read the market: price, momentum, money, news, and the market regime around them. | TideWatch 生来用于理解市场：价格、动量、资金、消息，以及它们所处的市场体制。 | 产品架构 |
 | 3 | 0:25-0:35 | 一条信号写入时间线，时钟推进 5d、10d、20d，结果回填。闭环圆环第一次合上。 | But it did one thing differently. Every signal became a promise. And the market came back to grade it. | 但它多做了一件事：每个信号都是一次承诺，而市场终会回来批改。 | 信号追踪系统 |
-| 4 | 0:35-0:48 | 第一浪覆盖画面。并排展示威海广泰 +40/+45 与锦浪科技 +92；五日结果分别落下。 | Its first lesson came from contradiction. Two weak bullish calls fell 9.3 percent. A stronger call, facing the same conflict, broke through. | 第一课来自矛盾：两个勉强看多的判断五日下跌 9.3%，更强的判断却穿越了同样的冲突。 | v1 博文案例 |
-| 5 | 0:48-0:58 | 琥珀色冲突框亮起；规则被写入：CONFLICT + LOW SCORE = WAIT。 | Lesson one: when evidence conflicts and conviction is weak, do nothing. A mistake became a guardrail. | 第一课：证据冲突、判断不强时，不交易。一次错误，变成一道护栏。 | v1 冲突+低分护栏 |
-| 6 | 0:58-1:10 | 第二浪。82 signals → 52 backfilled；区间图中 [+25,+50) 被红色圈出，4/4 wrong。 | More signals returned. A so-called slightly bullish zone had failed four times out of four, losing 6.58 percent on average. | 更多信号完成回填。所谓“弱多”区间四次全错，平均下跌 6.58%。 | v2 策略日志 |
+| 4 | 0:35-0:48 | 第一浪覆盖画面。明确标注“同一股票、两次信号”：威海广泰 `+40/+45 / conflict / -9.3%`；并排展示锦浪科技 `+92 / conflict / +15.8%`，绝对评分 50 的门槛在两者之间亮起。 | Its first lesson came from contradiction. Two conflicted calls on the same stock scored plus forty and plus forty-five. Both fell 9.3 percent. Another scored plus ninety-two and rose 15.8. | 第一课来自矛盾：同一只股票的两个冲突信号评分 +40 和 +45，五日均下跌 9.3%；另一个冲突信号评分 +92，五日上涨 15.8%。 | v1 原始提交与博文案例 |
+| 5 | 0:48-0:58 | 琥珀色冲突框亮起；规则被写入：`CONFLICT + |SCORE| < 50 → WAIT ADVISED`。 | Lesson one: when evidence conflicts and conviction is weak, do nothing. A mistake became a guardrail. | 第一课：证据冲突、判断不强时，不交易。一次错误，变成一道护栏。 | v1 冲突+低分护栏（高优先级建议，不阻止信号入库） |
+| 6 | 0:58-1:10 | 第二浪。82 signals → 52 backfilled；区间图中 `[+25,+50)` 被红色圈出，`0/4`。 | More signals returned. A so-called slightly bullish zone had failed four times out of four, losing 6.58 percent on average. | 更多信号完成回填。所谓“弱多”区间四次全错，平均下跌 6.58%。 | v2 策略日志 |
 | 7 | 1:10-1:17 | “BULLISH ≥ +25” 被划掉，改成 “BULLISH ≥ +50”；弱多沉入 WAIT。 | TideWatch stopped softening bad answers. It removed the answer. | TideWatch 不再美化不可靠的答案，而是直接删除这个答案。 | v2 看多门槛 |
 | 8 | 1:17-1:31 | 第三浪更高。评分柱图：[70,85) 89.5%，[85,95) 56.3%。高分柱突然坍塌。 | Then came the most unsettling lesson. Near-perfect scores were right only 56.3 percent of the time, while the lower band reached 89.5 percent. | 接着是最反直觉的一课：接近满分的判断只有 56.3% 正确，较低区间却达到 89.5%。 | v3 过度自信分析 |
 | 9 | 1:31-1:44 | 三张规则卡依次落下：OVERCONFIDENCE ×0.7、REVERSAL ×0.6、MA5 ↓ / THREE RED CANDLES ↑。 | Confidence was no longer taken at face value. Reversals were penalized. Noisy factors lost weight. Stronger evidence gained it. | 系统不再照单全收自己的自信。方向翻转被惩罚，噪声因子降权，更可靠的证据得到加强。 | v3 置信度与因子调整 |
@@ -104,3 +104,7 @@
 - [ ] 英文旁白使用真人还是 AI 声音
 - [ ] 演示账户采用哪组脱敏股票
 - [ ] 是否需要结尾二维码或 GitHub 地址
+
+## 十、事实核验
+
+逐项来源、样本口径和允许表述见 `FACT-CHECK.md`。任何旁白、字幕或图卡调整都必须同步复核该表。

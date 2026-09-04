@@ -7,15 +7,16 @@ Type=simple
 User=azureuser
 Group=azureuser
 WorkingDirectory=/home/azureuser/GitHub_Workspace/TideWatch-MCP-Server
-ExecStart=/home/azureuser/miniforge3/bin/poetry run tidewatch --http --port 8889
+ExecStart=/home/azureuser/miniforge3/bin/poetry run uvicorn tidewatch.server:http_app --host 127.0.0.1 --port 8889
 Restart=always
 RestartSec=5
 TimeoutStopSec=10
 Environment=PATH=/home/azureuser/miniforge3/bin:/home/azureuser/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-/home/azureuser/.config/tidewatch/dashboard-auth.env
 
-# Logging
-StandardOutput=append:/home/azureuser/GitHub_Workspace/TideWatch-MCP-Server/data/tidewatch-service.log
-StandardError=append:/home/azureuser/GitHub_Workspace/TideWatch-MCP-Server/data/tidewatch-service.log
+# Logging is managed and rotated by journald; the app log has its own bounded rotation.
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

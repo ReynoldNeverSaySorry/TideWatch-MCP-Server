@@ -67,7 +67,7 @@ def polish_narrative(
     if client is None:
         return template_narrative
 
-    model = model or os.getenv("COPILOTX_MODEL", "claude-sonnet-4.6")
+    model = model or os.getenv("COPILOTX_MODEL", "gpt-5.6-sol")
 
     portfolio_section = ""
     if portfolio_context:
@@ -130,13 +130,12 @@ def polish_narrative(
 {template_narrative}"""
 
     try:
-        response = client.chat.completions.create(
+        response = client.responses.create(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=500,
-            temperature=0.7,
+            input=prompt,
+            max_output_tokens=500,
         )
-        polished = response.choices[0].message.content.strip()
+        polished = (response.output_text or "").strip()
         if polished:
             logger.info(f"✨ LLM 叙事润色完成: {stock_name}")
             return polished

@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>观潮 TideWatch Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="auth-gate" id="authGate">
+  <form class="auth-card" id="authForm">
+    <h2>🌊 进入观潮</h2>
+    <p>仅限本人访问</p>
+    <label for="accessCode">访问验证码</label>
+    <input id="accessCode" type="password" autocomplete="current-password" required>
+    <div class="auth-error" id="authError"></div>
+    <button type="submit" id="authSubmit">进入</button>
+  </form>
+</div>
+<div class="app">
+  <!-- Loading -->
+  <div class="loading-overlay" id="loading">
+    <div class="loading-spinner">🌊</div>
+    <div class="loading-text" id="loadingText">正在连接观潮...</div>
+  </div>
+
+  <!-- Header -->
+  <div class="header">
+    <h1>🌊 <span>观潮</span> Dashboard</h1>
+    <div class="tab-bar">
+      <button class="tab-btn active" data-tab="live">📊 实时面板</button>
+      <button class="tab-btn" data-tab="review">🎯 信号复盘</button>
+    </div>
+    <div class="header-actions">
+      <span class="regime-badge" id="regimeBadge">--</span>
+      <button id="refreshBtn"><span class="btn-icon">↻</span> 刷新</button>
+    </div>
+  </div>
+
+  <div class="data-trust-bar" id="dataTrustBar">
+    <span class="data-trust-dot"></span>
+    <span id="dataTrustText">正在读取数据状态...</span>
+    <span class="data-trust-age" id="dataTrustAge"></span>
+  </div>
+
+  <!-- Top progress bar -->
+  <div class="progress-bar" id="progressBar"></div>
+
+  <!-- Tab: Live Panel -->
+  <div id="livePanel" class="tab-panel active">
+  <!-- Stats -->
+  <div class="stats-bar">
+    <div class="stat-card">
+      <div class="stat-label" id="totalPnlLabel">持仓总浮盈</div>
+      <div class="stat-value" id="totalPnl">--</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">持仓市值</div>
+      <div class="stat-value" id="totalValue">--</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">可用资金</div>
+      <div class="stat-value" id="availCash" style="color:var(--text-primary)">--</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">已扫描/池子</div>
+      <div class="stat-value" id="poolSize">--</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">上次扫描</div>
+      <div class="stat-value" id="lastScan" style="font-size:14px;">--</div>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+    <!-- Holdings -->
+    <div class="section" id="holdingsSection">
+      <div class="section-title">📌 持仓 <span class="count" id="holdingsCount"></span></div>
+      <div class="stock-grid" id="holdingsGrid"></div>
+    </div>
+
+    <!-- Watchlist -->
+    <div class="section" id="watchlistSection" style="display:none;">
+      <div class="section-title">👀 自选 <span class="count" id="watchlistCount"></span></div>
+      <div class="stock-grid" id="watchlistGrid"></div>
+    </div>
+
+    <!-- Hot strongest -->
+    <div class="section section-strong">
+      <div class="section-title">🔥 热门最强 <span class="count" id="strongCount"></span></div>
+      <div class="stock-grid" id="strongGrid"></div>
+    </div>
+
+    <!-- Hot weakest -->
+    <div class="section section-weak">
+      <div class="section-title">💀 热门最弱 <span class="count" id="weakCount"></span></div>
+      <div class="stock-grid" id="weakGrid"></div>
+    </div>
+  </div>
+  </div><!-- /livePanel -->
+
+  <!-- Tab: Signal Review -->
+  <div id="reviewPanel" class="tab-panel">
+    <div class="review-stats-bar">
+      <div class="stat-card">
+        <div class="stat-label">5日方向命中率</div>
+        <div class="stat-value" id="rvWinRate5d">--</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">看多胜率</div>
+        <div class="stat-value" id="rvBullWin">--</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">看空胜率</div>
+        <div class="stat-value" id="rvBearWin">--</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">平均收益 (正确 / 错误)</div>
+        <div class="stat-value" id="rvAvgReturn" style="font-size:16px;">--</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">已回填 / 总信号</div>
+        <div class="stat-value" id="rvFilled">--</div>
+      </div>
+    </div>
+    <div class="review-filter-bar">
+      <div class="review-controls">
+        <div class="review-range-group" aria-label="信号时间范围">
+          <button class="review-range-btn" data-days="30">近30天</button>
+          <button class="review-range-btn" data-days="90">近90天</button>
+          <button class="review-range-btn active" data-days="3650">全历史</button>
+        </div>
+        <div class="review-filter-group">
+          <button class="review-filter-btn active" data-filter="all">全部 <span class="review-filter-count" id="rvCountAll"></span></button>
+          <button class="review-filter-btn" data-filter="correct">✅ 正确 <span class="review-filter-count" id="rvCountCorrect"></span></button>
+          <button class="review-filter-btn" data-filter="wrong">❌ 错误 <span class="review-filter-count" id="rvCountWrong"></span></button>
+          <button class="review-filter-btn" data-filter="abstain">👁 观望 <span class="review-filter-count" id="rvCountAbstain"></span></button>
+          <button class="review-filter-btn" data-filter="pending">⏳ 待验证 <span class="review-filter-count" id="rvCountPending"></span></button>
+        </div>
+      </div>
+      <button class="backfill-btn" id="backfillBtn">🔄 回填信号</button>
+    </div>
+    <div class="main" id="reviewMain">
+      <div id="signalTimeline"><div class="empty">切换到此标签后自动加载</div></div>
+    </div>
+  </div><!-- /reviewPanel -->
+
+</div>
+
+<!-- Detail overlay -->
+<div class="detail-overlay" id="detailOverlay">
+  <div class="detail-panel" id="detailPanel">
+    <button class="detail-close" id="detailClose">✕</button>
+    <div id="detailContent">加载中...</div>
+    <div class="detail-nav-hint">← → 切换 · Esc 关闭</div>
+  </div>
+</div>
+
+<script src="/app.js" defer></script>
+</body>
+</html>

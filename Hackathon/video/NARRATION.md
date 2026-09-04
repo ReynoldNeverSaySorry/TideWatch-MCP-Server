@@ -1,4 +1,4 @@
-# TideWatch Narration v0.1
+# TideWatch Narration v0.2
 
 > **语气**：冷静、克制、有重量，不使用电影预告片式吼腔。
 > **语速**：英文约 115-125 WPM。
@@ -23,8 +23,10 @@ Five, ten, and twenty trading days later,
 the market came back to grade it.
 
 Its first lesson came from contradiction.
-Two weak bullish calls fell 9.3 percent.
-A stronger call, facing the same conflict, broke through.
+Two conflicted calls on the same stock
+scored plus forty and plus forty-five.
+Both fell 9.3 percent.
+Another scored plus ninety-two and rose 15.8.
 
 Lesson one:
 when evidence conflicts and conviction is weak,
@@ -91,8 +93,9 @@ TideWatch 生来用于理解市场：
 市场终会回来批改。
 
 第一课来自矛盾。
-两个勉强看多的判断，五日下跌 9.3%。
-更强的判断，却穿越了同样的冲突。
+同一只股票的两个冲突信号评分 +40 和 +45，
+五日均下跌 9.3%。
+另一个冲突信号评分 +92，五日上涨 15.8%。
 
 第一课：
 证据冲突、判断不强时，

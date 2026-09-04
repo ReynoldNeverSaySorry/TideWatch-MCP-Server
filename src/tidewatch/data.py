@@ -6,13 +6,21 @@ AKShare: 资金流向、新闻、龙虎榜、北向资金等 baostock 不覆盖�
 
 import logging
 import time
+import warnings
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import akshare as ak
 import baostock as bs
 import pandas as pd
 import yfinance as yf
+
+warnings.filterwarnings(
+    "ignore",
+    message="Timestamp.utcnow is deprecated.*",
+    module=r"yfinance\..*",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +31,128 @@ _bs_logged_in = False
 _bs_login_time = 0
 _BS_SESSION_TTL = 30  # 每 30 秒重新登录保持连接新鲜
 _BS_SOCKET_TIMEOUT = 10  # baostock socket 超时（秒），防止僵尸 TCP 卡死进程
+_bs_circuit_open_until = 0.0
+_BS_FAILURE_COOLDOWN = 300
+_BS_BLACKLIST_COOLDOWN = 1800
+_ak_daily_lock = threading.Lock()
+_ak_daily_circuit_open_until = 0.0
+_AK_DAILY_FAILURE_COOLDOWN = 600
+_yf_a_circuit_open_until = 0.0
+_YF_A_FAILURE_COOLDOWN = 600
+_MARKET_CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "market_cache"
+
+
+class ProviderUnavailable(RuntimeError):
+    """Market data provider is unavailable until its circuit cools down."""
+
+
+def _bs_circuit_remaining() -> int:
+    return max(0, int(_bs_circuit_open_until - time.monotonic()))
+
+
+def _daily_cache_path(symbol: str) -> Path:
+    safe_symbol = "".join(char for char in symbol if char.isalnum() or char in ("-", "_"))
+    return _MARKET_CACHE_DIR / f"{safe_symbol}.csv"
+
+
+def _write_daily_cache(symbol: str, frame: pd.DataFrame) -> None:
+    if frame.empty:
+        return
+    try:
+        _MARKET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _daily_cache_path(symbol)
+        temp = path.with_suffix(".tmp")
+        frame.to_csv(temp, index=False)
+        temp.replace(path)
+    except Exception as exc:
+        logger.debug("写入 %s K线缓存失败: %s", symbol, exc)
+
+
+def _read_daily_cache(symbol: str, days: int) -> pd.DataFrame:
+    path = _daily_cache_path(symbol)
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        frame = pd.read_csv(path)
+        frame["date"] = pd.to_datetime(frame["date"])
+        for column in frame.columns:
+            if column != "date":
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame = frame.dropna(subset=["close"]).sort_values("date").tail(days).reset_index(drop=True)
+        frame.attrs["source"] = "local_cache"
+        return frame
+    except Exception as exc:
+        logger.warning("读取 %s K线缓存失败: %s", symbol, exc)
+        return pd.DataFrame()
+
+
+def _get_a_share_daily_fallback(symbol: str, days: int, adjust: str) -> pd.DataFrame:
+    global _ak_daily_circuit_open_until
+    remaining = max(0, int(_ak_daily_circuit_open_until - time.monotonic()))
+    if remaining > 0:
+        return pd.DataFrame()
+    if not _ak_daily_lock.acquire(timeout=1):
+        return pd.DataFrame()
+    try:
+        if _ak_daily_circuit_open_until > time.monotonic():
+            return pd.DataFrame()
+        end_str = datetime.now().strftime("%Y%m%d")
+        start_str = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
+        frame = ak.stock_zh_a_hist(
+            symbol=symbol, period="daily", start_date=start_str, end_date=end_str, adjust=adjust
+        )
+        frame = frame.rename(columns={
+            "日期": "date", "开盘": "open", "收盘": "close", "最高": "high",
+            "最低": "low", "成交量": "volume", "涨跌幅": "pct_change",
+            "换手率": "turn",
+        })
+        required = ["date", "open", "high", "low", "close", "volume", "pct_change"]
+        if frame.empty or not all(column in frame.columns for column in required):
+            raise RuntimeError("AKShare returned no usable daily rows")
+        frame["date"] = pd.to_datetime(frame["date"])
+        for column in required[1:] + ["turn"]:
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame = frame.dropna(subset=["close"]).sort_values("date").tail(days).reset_index(drop=True)
+        frame.attrs["source"] = "akshare"
+        _ak_daily_circuit_open_until = 0.0
+        return frame
+    except Exception as exc:
+        _ak_daily_circuit_open_until = time.monotonic() + _AK_DAILY_FAILURE_COOLDOWN
+        logger.warning("AKShare A股日线 fallback 失败，熔断 %ds: %s", _AK_DAILY_FAILURE_COOLDOWN, exc)
+        return pd.DataFrame()
+    finally:
+        _ak_daily_lock.release()
+
+
+def _to_yahoo_a_ticker(symbol: str) -> str:
+    return f"{symbol}.SS" if symbol.startswith(("5", "6", "9")) else f"{symbol}.SZ"
+
+
+def _get_yfinance_a_daily(symbol: str, days: int) -> pd.DataFrame:
+    global _yf_a_circuit_open_until
+    if _yf_a_circuit_open_until > time.monotonic():
+        return pd.DataFrame()
+    try:
+        ticker = yf.Ticker(_to_yahoo_a_ticker(symbol))
+        start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
+        frame = ticker.history(start=start, auto_adjust=False)
+        if frame.empty:
+            raise RuntimeError("yfinance returned no A-share rows")
+        frame = frame.reset_index().rename(columns={
+            "Date": "date", "Open": "open", "Close": "close",
+            "High": "high", "Low": "low", "Volume": "volume",
+        })
+        frame["date"] = pd.to_datetime(frame["date"]).dt.tz_localize(None)
+        frame["pct_change"] = frame["close"].pct_change() * 100
+        frame = frame[["date", "open", "high", "low", "close", "volume", "pct_change"]]
+        frame.attrs["source"] = "yfinance"
+        _yf_a_circuit_open_until = 0.0
+        return frame.dropna(subset=["close"]).tail(days).reset_index(drop=True)
+    except Exception as exc:
+        _yf_a_circuit_open_until = time.monotonic() + _YF_A_FAILURE_COOLDOWN
+        logger.warning("yfinance A股 fallback 失败，熔断 %ds: %s", _YF_A_FAILURE_COOLDOWN, exc)
+        return pd.DataFrame()
 
 
 def _force_close_bs_socket():
@@ -84,10 +214,14 @@ except Exception as e:
 
 def _bs_login():
     """确保 baostock 已登录（超过 30s 自动重连，带 socket 超时保护）"""
-    global _bs_logged_in, _bs_login_time
+    global _bs_logged_in, _bs_login_time, _bs_circuit_open_until
     now = time.time()
     if _bs_logged_in and (now - _bs_login_time) < _BS_SESSION_TTL:
-        return  # 连接还新鲜
+        return True  # 连接还新鲜
+
+    remaining = _bs_circuit_remaining()
+    if remaining > 0:
+        raise ProviderUnavailable(f"baostock circuit open ({remaining}s remaining)")
 
     # 强制关闭旧 socket + 标记 session 失效（打断可能的僵尸 TCP 连接）
     _force_close_bs_socket()
@@ -106,13 +240,23 @@ def _bs_login():
     if lg.error_code == "0":
         _bs_logged_in = True
         _bs_login_time = now
+        _bs_circuit_open_until = 0.0
+        return True
     else:
         _bs_logged_in = False
-        logger.error(f"baostock 登录失败: {lg.error_msg}")
+        message = str(lg.error_msg or "unknown login error")
+        cooldown = _BS_BLACKLIST_COOLDOWN if "黑名单" in message else _BS_FAILURE_COOLDOWN
+        _bs_circuit_open_until = time.monotonic() + cooldown
+        logger.error("baostock 登录失败: %s；熔断 %ds", message, cooldown)
+        raise ProviderUnavailable(message)
 
 
 def bs_heartbeat() -> bool:
     """baostock 心跳检测 — 轻量 ping 沪深300，失败则强制重连。供后台定时调用。"""
+    remaining = _bs_circuit_remaining()
+    if remaining > 0:
+        logger.debug("💓 baostock heartbeat: 熔断中，%ds 后再探测", remaining)
+        return False
     try:
         if not _bs_lock.acquire(timeout=10):
             logger.warning("💓 baostock heartbeat: 获取锁超时")
@@ -136,7 +280,7 @@ def bs_heartbeat() -> bool:
             if _bs_lock.acquire(timeout=10):
                 try:
                     _bs_login()
-                    logger.info("💓 baostock heartbeat: 重连成功")
+                    logger.info("💓 baostock heartbeat: 重连并验证成功")
                 finally:
                     _bs_lock.release()
         except Exception as e2:
@@ -217,7 +361,9 @@ class MarketData:
             df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
             df["pct_change"] = df["close"].pct_change() * 100
             df = df[["date", "open", "high", "low", "close", "volume", "pct_change"]]
-            return df.dropna(subset=["close"]).tail(days).reset_index(drop=True)
+            df = df.dropna(subset=["close"]).tail(days).reset_index(drop=True)
+            df.attrs["source"] = "yfinance"
+            return df
         except Exception as e:
             logger.error(f"yfinance {symbol} 失败: {e}")
             return pd.DataFrame()
@@ -317,12 +463,27 @@ class MarketData:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
                 df["date"] = pd.to_datetime(df["date"])
                 df = df.dropna(subset=["close"]).sort_values("date").tail(days).reset_index(drop=True)
+                df.attrs["source"] = "baostock"
+                _write_daily_cache(symbol, df)
                 return df
         except Exception as e:
             logger.warning(f"baostock {symbol} 异常: {e}")
             _force_close_bs_socket()
 
-        # AKShare fallback（仅在 baostock 完全不可用时才尝试，如 ETF 特殊代码）
+        # baostock 不可用时，A股与 ETF 均优先用生产实测可用的 yfinance 接口。
+        fallback = _get_yfinance_a_daily(symbol, days)
+        if not fallback.empty:
+            _write_daily_cache(symbol, fallback)
+            return fallback
+
+        # yfinance 失败后，普通 A 股仅允许一个 AKShare 探测，失败后熔断。
+        if not self._is_etf(symbol):
+            fallback = _get_a_share_daily_fallback(symbol, days, adjust)
+            if not fallback.empty:
+                _write_daily_cache(symbol, fallback)
+                return fallback
+
+        # ETF 使用专用 AKShare 接口。
         if self._is_etf(symbol):
             end_str = datetime.now().strftime("%Y%m%d")
             start_str = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
@@ -334,10 +495,15 @@ class MarketData:
                 })
                 df["date"] = pd.to_datetime(df["date"])
                 df = df.sort_values("date").tail(days).reset_index(drop=True)
+                df.attrs["source"] = "akshare"
+                _write_daily_cache(symbol, df)
                 return df
             except Exception as e:
                 logger.error(f"获取 ETF {symbol} 日K线失败: {e}")
-        return pd.DataFrame()
+        cached = _read_daily_cache(symbol, days)
+        if not cached.empty:
+            logger.warning("%s 使用最近成功 K线缓存，最新日期=%s", symbol, cached.iloc[-1]["date"].date())
+        return cached
 
     def get_stock_realtime(self, symbol: str) -> dict:
         """
@@ -489,10 +655,19 @@ class MarketData:
                 for col in ["open", "high", "low", "close", "volume", "pct_change"]:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
                 df["date"] = pd.to_datetime(df["date"])
+                df.attrs["source"] = "baostock"
                 return df.tail(days).reset_index(drop=True)
         except Exception as e:
             logger.warning(f"baostock 指数 {index_code} 失败, fallback AKShare: {e}")
             _force_close_bs_socket()
+
+        # Yahoo index fallback is reachable from Azure and avoids Eastmoney rate limits.
+        yahoo_indices = {"000001": "000001.SS", "399001": "399001.SZ", "399006": "399006.SZ"}
+        yahoo_symbol = yahoo_indices.get(index_code)
+        if yahoo_symbol:
+            yahoo_frame = self.get_us_stock_daily(yahoo_symbol, days)
+            if not yahoo_frame.empty:
+                return yahoo_frame
 
         # AKShare fallback
         try:
@@ -500,6 +675,7 @@ class MarketData:
             df = ak.stock_zh_index_daily_em(symbol=f"{prefix}{index_code}")
             df = df.rename(columns={"date": "date", "open": "open", "close": "close", "high": "high", "low": "low", "volume": "volume"})
             df["date"] = pd.to_datetime(df["date"])
+            df.attrs["source"] = "akshare"
             return df.tail(days).reset_index(drop=True)
         except Exception as e:
             logger.error(f"获取指数 {index_code} 失败 (baostock+AKShare): {e}")
@@ -613,7 +789,11 @@ def _bs_backfill_login():
     pass
 
 
-def get_stock_daily_for_backfill(symbol: str, days: int = 60) -> pd.DataFrame:
+def get_stock_daily_for_backfill(
+    symbol: str,
+    days: int = 60,
+    market_data: Optional[MarketData] = None,
+) -> pd.DataFrame:
     """回填专用的 K 线获取 — 美股走 yfinance（零锁），A 股走 baostock 但用短超时"""
     # 美股完全不需要 baostock，直接 yfinance
     if is_us_stock(symbol):
@@ -636,31 +816,9 @@ def get_stock_daily_for_backfill(symbol: str, days: int = 60) -> pd.DataFrame:
             logger.warning(f"backfill yfinance {symbol} 失败: {e}")
             return pd.DataFrame()
 
-    # A 股：用主锁但短超时（3s），拿不到就跳过这只，不阻塞
-    acquired = _bs_lock.acquire(timeout=3)
-    if not acquired:
-        logger.debug(f"backfill {symbol}: baostock 锁忙，跳过")
+    # A 股回填复用完整多源链路，避免 baostock 故障时回填整体中断。
+    provider = market_data or MarketData()
+    frame = provider.get_stock_daily(symbol, days=days)
+    if frame.empty:
         return pd.DataFrame()
-    try:
-        _bs_login()
-        bs_code = _to_bs_code(symbol)
-        start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
-        end = datetime.now().strftime("%Y-%m-%d")
-        rs = bs.query_history_k_data_plus(
-            bs_code, "date,close",
-            start_date=start, end_date=end,
-            frequency="d", adjustflag="2",
-        )
-        rows = []
-        while (rs.error_code == "0") and rs.next():
-            rows.append(rs.get_row_data())
-    finally:
-        _bs_lock.release()
-
-    if not rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(rows, columns=["date", "close"])
-    df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    df["date"] = pd.to_datetime(df["date"])
-    return df.dropna(subset=["close"]).drop_duplicates(subset=["date"]).sort_values("date").tail(days).reset_index(drop=True)
+    return frame[["date", "close"]].drop_duplicates(subset=["date"]).sort_values("date").tail(days).reset_index(drop=True)

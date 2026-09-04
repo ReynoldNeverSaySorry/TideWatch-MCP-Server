@@ -12,7 +12,7 @@ AI 投研搭档 MCP Server — 多维融合股票分析引擎。不是仪表盘�
 cd X-Workspace/TideWatch-MCP-Server
 poetry install              # 安装依赖
 poetry run tidewatch        # 本地模式 (stdio)
-poetry run tidewatch --http --port 8889  # 远程模式 (HTTP)
+poetry run tidewatch --http --port 8889  # 远程模式 (MCP + Dashboard)
 
 # 冒烟测试（每次改完必跑）
 poetry run python tests/smoke_test.py --quick   # 快速 ~40s, 9个核心工具
@@ -34,7 +34,7 @@ TideWatch-MCP-Server/
 │       ├── technical.py    # 技术分析引擎
 │       ├── regime.py       # 市场体制识别
 │       ├── narrative.py    # 叙事式分析报告生成
-│       ├── llm.py          # LLM 叙事润色 (CopilotX + Claude Sonnet 4.6)
+│       ├── llm.py          # LLM 叙事润色 (CopilotX + GPT-5.6 Sol Responses API)
 │       ├── tracker.py      # 信号追踪系统 (SQLite, 当天+同score去重)
 │       ├── guardrails.py   # 行为护栏 (Anti-FOMO, 3条规则)
 │       └── portfolio.py    # 三级股票池 (持仓+自选+热门24只)
@@ -49,7 +49,7 @@ TideWatch-MCP-Server/
     └── signals.db          # 信号追踪数据库 (持仓/自选/账户/信号全在远程 VM)
 ```
 
-注意：Phase 1-4 全部完成，Phase 5 前两项（信号回填 + 复盘看板）已完成。Dashboard 本地维护（`/static/tidewatch.html`，在 Zola 站点根目录下），不走 git push。HOT_POOL 已从 76 只精简至 24 只（8板块×3龙头），扫描耗时从 ~22s 降至 ~4.25s。
+注意：Phase 1-4 全部完成，Phase 5 前两项（信号回填 + 复盘看板）已完成。Dashboard 已迁入 `src/tidewatch/web/` 并部署到 `https://tidewatch.polly.wang/`，仅本人验证码访问；浏览器不持有 MCP API Key。HOT_POOL 已从 76 只精简至 24 只（8板块×3龙头）。
 
 **⚠️ 数据库在远程 Azure VM 上**：`data/signals.db`（含持仓、自选、账户资金、信号记录）只在 Azure VM 有实际数据，本地仅有空库。排查数据问题时必须 SSH 到远程查询：
 ```bash
@@ -105,6 +105,14 @@ ssh -F ssh.config Azure-Server "sqlite3 -header -csv $DB 'SELECT * FROM account;
 
 **v4 趋势疲劳**: 连续同向 5 天仅对**看多**触发（**P3**: 看空连续 68.9% 胜率不衰减）
 
+### v5 测量与 Shadow（2026-09-04）
+
+- 正式用户方向仍为 v4；v5 不直接改变买卖建议。
+- `action_outcome_*` 按最终 direction 评价，观望记 `abstain`；旧 `outcome_*` 仅保留审计。
+- `v5.1-shadow` 同时验证“非 bull 弱看空恢复”与“bull 体制方向静默”，至少 30 个前瞻样本后再决定是否转正。
+- `shadow_signals` 每个可信交易日记录完整三级池；覆盖率 <90%、股票/指数日期不一致或非预期交易日时 fail-closed 不写入。
+- 因子调权前必须达到跨股票 shadow 样本 ≥500，并与 always-bull / always-bear / regime baseline 比较。
+
 ## Roadmap
 
 ### Phase 1: ✅ MCP Engine (2026-03-11)
@@ -121,7 +129,7 @@ ssh -F ssh.config Azure-Server "sqlite3 -header -csv $DB 'SELECT * FROM account;
 - [x] scan_market 工具（全市场扫描 Top/Bottom N 强弱股）
 
 ### Phase 3: ✅ 深度进化 (2026-03-13)
-- [x] LLM 叙事润色（CopilotX API + Claude Sonnet 4，失败 fallback 模板叙事）(2026-03-12)
+- [x] LLM 叙事润色（CopilotX Responses API + GPT-5.6 Sol，失败 fallback 模板叙事）(2026-03-12，2026-08-05 迁移模型)
 - [x] scan_market v2 — 三级股票池扫描（持仓+自选+热门24只，串行K线+技术评分，绕过 push2 反爬）5min缓存 (2026-03-13)
 - [x] manage_holdings / manage_watchlist — 持仓管理（带买入价）+ 自选股管理（SQLite）(2026-03-13)
 - [x] manage_account — 账户资金管理（可用资金/总资产/持仓市值）(2026-03-18)
@@ -219,6 +227,13 @@ ssh -F ssh.config Azure-Server "sudo systemctl restart tidewatch"  # 重启
 ssh -F ssh.config Azure-Server "cd ~/GitHub_Workspace/TideWatch-MCP-Server && git pull && sudo systemctl restart tidewatch"  # 更新部署
 ```
 
+Dashboard 认证：
+
+- 本机访问码：`~/.tidewatch-dashboard-code`（权限 600，不进仓库）
+- 远端认证配置：`~/.config/tidewatch/dashboard-auth.env`（权限 600）
+- Session：30 天，`Secure + HttpOnly + SameSite=Strict`
+- MCP Key 与 Dashboard Session 完全隔离；本机当前 MCP Key 备份在 `~/.tidewatch-mcp-key`
+
 ### 本地模式 (stdio)
 ```bash
 poetry run tidewatch            # Claude Desktop / Cursor / VS Code
@@ -265,6 +280,12 @@ tidewatch.polly.wang:443 (Nginx + Let's Encrypt SSL)
 5. `sudo systemctl enable --now tidewatch`
 
 ## Known Issues
+
+- **2026-08-06 当前外部状态**：Azure 出口被 baostock 判为“黑名单用户”。系统已加 30 分钟熔断，不再重试风暴；A 股日线按 `baostock → yfinance A股 → AKShare → 最近成功 K线缓存` 降级。Yahoo/Tencent/Sina 在 Azure 实测可达。
+- 所有扫描入口通过 `_scan_run_lock` singleflight；并发 refresh 复用 in-flight，不重复全量扫描。
+- `scan_market` 响应含 `meta.status/data_timestamp/age_seconds/source/refreshing`；磁盘缓存恢复不再伪装成刚生成。
+- Dashboard API 使用同源 Session：`/api/dashboard/overview`、`stocks/{symbol}`、`signals`、`refresh`、`narrative`；`/mcp` 保持独立 API Key。
+- 日志改为 journald + 应用 20 MB × 7 滚动日志；旧 service 日志归档为 `data/tidewatch-service.log.pre-journald-20260806.gz`。
 
 - `stock_zh_a_spot_em()` 在本地 Mac 和 Azure VM 上均无法使用 — 根因是东方财富 `push2.eastmoney.com` 对非浏览器请求做了反爬限制（SSL 握手成功但返回 Empty reply），与 DNS 和地域无关。影响范围：`scan_market`、`get_stock_realtime`、`get_stock_name`（已有 fallback）。其他 AKShare 接口（日K线 `stock_zh_a_hist`、资金流向、新闻等）正常
 - MCP 工具不要加 `dict[str, Any]` 返回类型注解（FastMCP 2.x outputSchema 冲突）

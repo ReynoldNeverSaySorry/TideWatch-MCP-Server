@@ -33,8 +33,13 @@ MCP Tools:
 
 import asyncio
 import argparse
+import base64
 import concurrent.futures
+import hashlib
+import hmac
+import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import sys
 import time as _time
@@ -54,6 +59,7 @@ _analyze_cache_date: str = ""  # 当前缓存的交易日，新交易日自动�
 from typing import Any
 
 import pandas as pd
+import numpy as np
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 
@@ -69,8 +75,22 @@ from .portfolio import (
     register_change_callback,
 )
 from .regime import RegimeDetector
+from .strategy import (
+    OFFICIAL_STRATEGY_VERSION,
+    SHADOW_POLICY_VERSION,
+    should_record_shadow_scan,
+    v4_official_decision,
+    v5_shadow_decision,
+)
 from .technical import TechnicalAnalyzer
-from .tracker import record_signal, get_recent_signals, get_signal_stats, update_outcomes
+from .tracker import (
+    get_recent_signals,
+    get_signal_stats,
+    record_shadow_scan,
+    record_signal,
+    update_outcomes,
+    update_shadow_outcomes,
+)
 
 # ============================================================================
 # 配置加载
@@ -101,7 +121,7 @@ logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO")),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler(log_path),
+        RotatingFileHandler(log_path, maxBytes=20 * 1024 * 1024, backupCount=7),
         logging.StreamHandler(sys.stderr),
     ],
 )
@@ -118,10 +138,18 @@ market_data = MarketData()
 technical = TechnicalAnalyzer()
 regime_detector = RegimeDetector()
 narrator = NarrativeGenerator()
+_data_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="tidewatch-data")
+_analysis_slots = asyncio.Semaphore(3)
 
 # HTTP 远程部署配置
 MCP_API_KEY = os.getenv("MCP_API_KEY", "")
 MCP_API_KEY_ENABLED = bool(MCP_API_KEY)
+DASHBOARD_CODE_HASH = os.getenv("TIDEWATCH_DASHBOARD_CODE_HASH", "")
+DASHBOARD_SESSION_SECRET = os.getenv("TIDEWATCH_SESSION_SECRET", "")
+DASHBOARD_AUTH_DISABLED = os.getenv("TIDEWATCH_AUTH_DISABLED", "").lower() == "true"
+DASHBOARD_COOKIE = "tidewatch_session"
+DASHBOARD_SESSION_SECONDS = 30 * 24 * 60 * 60
+DASHBOARD_SESSION_VERSION = 1
 
 VERSION = "0.3.0"
 
@@ -137,6 +165,7 @@ _scan_cache = {"result": None, "time": 0}
 _SCAN_CACHE_TTL = 300  # 5分钟
 _warmup_done = threading.Event()  # 预热完成标志
 _scan_bg_refreshing = False  # 后台刷新中标志，防止并发刷新
+_scan_run_lock = threading.Lock()  # 所有扫描入口共用 singleflight
 
 
 # ─── 后台预热 & 定时刷新 ─────────────────────────────────
@@ -148,6 +177,18 @@ def _is_market_hours():
         return False
     hhmm = now.hour * 100 + now.minute
     return 915 <= hhmm <= 1505
+
+
+def _expected_market_data_date(now: datetime | None = None) -> str:
+    """Expected latest A-share session date, excluding exchange holidays."""
+    now = now or _now_bj()
+    date = now.date()
+    hhmm = now.hour * 100 + now.minute
+    if now.weekday() >= 5 or hhmm < 915:
+        date -= timedelta(days=1)
+        while date.weekday() >= 5:
+            date -= timedelta(days=1)
+    return date.isoformat()
 
 def _warmup_loop():
     """后台线程：启动预热 + 盘中定时刷新 scan_market 缓存"""
@@ -174,7 +215,7 @@ def _warmup_loop():
         try:
             from .data import bs_heartbeat
             if not bs_heartbeat():
-                logger.warning("💓 baostock 心跳异常，已尝试重连")
+                logger.debug("💓 baostock 心跳未就绪")
         except Exception as e:
             logger.error(f"💓 baostock 心跳检测异常: {e}")
 
@@ -186,7 +227,7 @@ def _warmup_loop():
             except Exception as e:
                 logger.error(f"🔄 定时刷新失败: {e}")
 
-def _run_scan_warmup():
+def _run_scan_warmup_impl():
     """扫描核心逻辑（唯一实现）— 填充 _scan_cache + 持久化到磁盘"""
     pool = get_scan_pool()
     holdings_info = {h["symbol"]: h for h in get_holdings()}
@@ -195,15 +236,29 @@ def _run_scan_warmup():
     # A股/美股分别拉一次体制，各自共用（避免重复拉指数）
     _regime_biases = {}  # {"A": bias, "US": bias}
     _regime_names = {}   # {"A": "mild_bear", "US": "bull"}
+    _regime_results = {}
+    _benchmark_snapshots = {}
+    scan_sources = set()
+    market_dates = set()
     for market_key, idx_code in [("A", "000001"), ("US", "SPY")]:
         try:
             idx_df = market_data.get_index_daily(idx_code, days=120)
+            if idx_df.attrs.get("source"):
+                scan_sources.add(idx_df.attrs["source"])
             r = regime_detector.detect(idx_df)
             _regime_biases[market_key] = regime_detector.get_regime_adjustment(r["regime"])["signal_bias"]
             _regime_names[market_key] = r["regime"]
+            _regime_results[market_key] = r
+            if not idx_df.empty:
+                _benchmark_snapshots[market_key] = {
+                    "symbol": idx_code,
+                    "price": float(idx_df.iloc[-1]["close"]),
+                    "date": pd.Timestamp(idx_df.iloc[-1]["date"]).date().isoformat(),
+                }
         except Exception:
             _regime_biases[market_key] = 0
             _regime_names[market_key] = ""
+            _regime_results[market_key] = {}
 
     def _score_one(code):
         is_us = is_us_stock(str(code))
@@ -214,6 +269,10 @@ def _run_scan_warmup():
             daily = market_data.get_stock_daily(str(code), days=60)
             if daily.empty or len(daily) < 20:
                 return None
+            if daily.attrs.get("source"):
+                scan_sources.add(daily.attrs["source"])
+            if "date" in daily.columns:
+                market_dates.add(pd.Timestamp(daily.iloc[-1]["date"]).date().isoformat())
             tech_result = technical.analyze(daily)
             if "error" in tech_result:
                 return None
@@ -233,18 +292,17 @@ def _run_scan_warmup():
                 name = market_data.get_stock_name(str(code))
             raw_score = tech_result["trend"]["score"]
             adjusted = max(-100, min(100, raw_score + regime_bias))
-            # v4 信号阈值（P1: 偏空消灭, P2: mild_bull 看空收窄到 -35）
-            if adjusted >= 50:
-                sig = "中性观望" if regime_name == "mild_bear" else "看多"
-            elif adjusted >= 8: sig = "中性观望"
-            elif adjusted <= -25:
-                if regime_name == "mild_bull" and adjusted > -35:
-                    sig = "中性观望"
-                else:
-                    sig = "看空"
-            else:
-                # P1: [-25,-8) 原偏空区间 + [-8,+8) 均归入中性（偏空 40% 胜率+反向收益）
-                sig = "中性观望"
+            confidence = _calc_confidence(adjusted, str(code))
+            sig, decision_tags = v4_official_decision(adjusted, confidence, regime_name)
+            shadow_direction, shadow_tags = v5_shadow_decision(
+                sig, adjusted, confidence, regime_name
+            )
+            benchmark = _benchmark_snapshots.get(market_key, {})
+            benchmark_pct_20d = _regime_results.get(market_key, {}).get("metrics", {}).get("pct_20d")
+            stock_pct_20d = tech_result.get("price_position", {}).get("pct_20d")
+            relative_strength_20d = None
+            if stock_pct_20d is not None and benchmark_pct_20d is not None:
+                relative_strength_20d = round(float(stock_pct_20d) - float(benchmark_pct_20d), 2)
 
             # 轻量冲突检测（用 OBV 斜率代替资金流向，零额外网络请求）
             scan_conflicts = []
@@ -286,6 +344,21 @@ def _run_scan_warmup():
                 "rsi": tech_result["momentum"]["rsi_14"],
                 "reasons_bull": tech_result["trend"]["reasons_bull"][:3],
                 "reasons_bear": tech_result["trend"]["reasons_bear"][:3],
+                "data_source": daily.attrs.get("source", "unknown"),
+                "_shadow_record": {
+                    "symbol": str(code), "name": name,
+                    "signal_source": "holding" if code in holdings_info else "watchlist" if code in watchlist_info else "hot",
+                    "policy_version": SHADOW_POLICY_VERSION,
+                    "raw_score": raw_score, "adjusted_score": adjusted,
+                    "confidence": confidence, "official_direction": sig,
+                    "shadow_direction": shadow_direction, "regime": regime_name,
+                    "decision_tags": decision_tags + shadow_tags,
+                    "price_at_signal": latest_price,
+                    "benchmark_symbol": benchmark.get("symbol"),
+                    "benchmark_price_at_signal": benchmark.get("price"),
+                    "benchmark_date_at_signal": benchmark.get("date"),
+                    "relative_strength_20d": relative_strength_20d,
+                },
             }
             if scan_conflicts:
                 result["conflicts"] = scan_conflicts
@@ -306,9 +379,12 @@ def _run_scan_warmup():
     all_symbols = pool["holdings"] + pool["watchlist"] + pool["hot"]
     results = {}
     consecutive_failures = 0
+    a_provider_unavailable = False
 
     # baostock 是单连接串行，不用 ThreadPoolExecutor（更快更稳）
     for sym in all_symbols:
+        if a_provider_unavailable and not is_us_stock(str(sym)):
+            continue
         try:
             r = _score_one(sym)
             if r:
@@ -323,7 +399,7 @@ def _run_scan_warmup():
 
         # 级联失败检测：连续 3+ A 股失败 → 暂停重连 baostock
         if consecutive_failures >= 3:
-            logger.warning(f"⚠️ 扫描级联失败: 连续 {consecutive_failures} 只 A 股失败，强制重连 baostock")
+            logger.warning(f"⚠️ 扫描级联失败: 连续 {consecutive_failures} 只 A 股失败，探测 baostock 一次")
             try:
                 from .data import _force_close_bs_socket, _bs_login, _bs_lock
                 if _bs_lock.acquire(timeout=10):
@@ -331,11 +407,12 @@ def _run_scan_warmup():
                         _force_close_bs_socket()
                         _time.sleep(1)
                         _bs_login()
-                        logger.info("⚠️ baostock 重连成功，继续扫描")
+                        logger.info("⚠️ baostock 探测成功，继续扫描")
                     finally:
                         _bs_lock.release()
             except Exception as e:
-                logger.error(f"⚠️ baostock 重连失败: {e}")
+                logger.warning(f"⚠️ baostock 探测失败，本轮不再重试: {e}")
+                a_provider_unavailable = True
             consecutive_failures = 0
 
         _time.sleep(0.05)  # 让出锁给 analyze_stock 请求
@@ -343,7 +420,7 @@ def _run_scan_warmup():
     # 持仓/自选末尾重试：只要有任一关键 A 股缺失就重连后补一轮
     critical_symbols = pool["holdings"] + pool["watchlist"]
     missing_critical = [s for s in critical_symbols if s not in results and not is_us_stock(str(s))]
-    if missing_critical:
+    if missing_critical and not a_provider_unavailable:
         logger.warning(f"🔄 {len(missing_critical)} 只关键 A 股缺失({missing_critical})，末尾重试")
         try:
             from .data import _force_close_bs_socket, _bs_login, _bs_lock
@@ -370,6 +447,33 @@ def _run_scan_warmup():
     still_missing = [s for s in critical_symbols if s not in results]
     if still_missing:
         logger.error(f"❌ 扫描完成但仍有 {len(still_missing)} 只关键股票缺失: {still_missing}")
+
+    scan_ratio = len(results) / len(all_symbols) if all_symbols else 0
+    shadow_records = []
+    for result in results.values():
+        shadow_record = result.pop("_shadow_record", None)
+        if shadow_record:
+            shadow_records.append(shadow_record)
+    shadow_signal_date = next(iter(market_dates)) if len(market_dates) == 1 else None
+    benchmark_dates = {
+        record.get("benchmark_date_at_signal") for record in shadow_records
+    }
+    if (
+        shadow_records
+        and benchmark_dates == {shadow_signal_date}
+        and should_record_shadow_scan(
+            scan_ratio, shadow_signal_date, _expected_market_data_date(_now_bj())
+        )
+    ):
+        try:
+            recorded = record_shadow_scan(shadow_records, shadow_signal_date)
+            shadow_updated = update_shadow_outcomes()
+            logger.info(
+                "🧪 Shadow 扫描: 日期=%s 记录=%d 回填=%s",
+                shadow_signal_date, recorded, shadow_updated,
+            )
+        except Exception as e:
+            logger.error(f"🧪 Shadow 扫描记录失败: {e}")
 
     holding_results = sorted([results[s] for s in pool["holdings"] if s in results], key=lambda x: x["score"], reverse=True)
     watchlist_results = sorted([results[s] for s in pool["watchlist"] if s in results], key=lambda x: x["score"], reverse=True)
@@ -403,10 +507,11 @@ def _run_scan_warmup():
             "scanned": len(results),
         },
         "timestamp": _now_bj().isoformat(),
+        "market_data_date": max(market_dates) if market_dates else None,
+        "sources": sorted(scan_sources),
     }
     # 残缺缓存覆盖保护：成功率过低时不覆盖旧缓存
     # TODO: 0.5 阈值基于当前 ~32 只池子，若池子缩至 <10 只需调高
-    scan_ratio = len(results) / len(all_symbols) if all_symbols else 0
     if scan_ratio < 0.5 and _scan_cache["result"]:
         logger.warning(f"⚠️ 扫描成功率过低 ({len(results)}/{len(all_symbols)} = {scan_ratio:.0%})，保留旧缓存")
         return
@@ -434,12 +539,28 @@ def _load_disk_cache():
         if cache_path.exists():
             data = json.loads(cache_path.read_text())
             _scan_cache["result"] = data
-            _scan_cache["time"] = _time.monotonic()  # 标记为刚缓存
+            _scan_cache["time"] = 0  # 磁盘缓存必须按内容时间判断，不能伪装成刚生成
             logger.info(f"💾 从磁盘恢复扫描缓存: {data.get('pool_size', {}).get('scanned', '?')} 只股票")
             return True
     except Exception as e:
         logger.debug(f"磁盘缓存恢复失败: {e}")
     return False
+
+
+def _run_scan_warmup():
+    """Run at most one full scan; concurrent callers reuse the active snapshot."""
+    if not _scan_run_lock.acquire(blocking=False):
+        if not _scan_cache["result"]:
+            logger.info("♻️ 首次扫描已在进行，等待当前 in-flight")
+            with _scan_run_lock:
+                return bool(_scan_cache["result"])
+        logger.info("♻️ 扫描已在进行，复用当前 in-flight")
+        return False
+    try:
+        _run_scan_warmup_impl()
+        return True
+    finally:
+        _scan_run_lock.release()
 
 # 启动时先尝试从磁盘恢复缓存
 _load_disk_cache()
@@ -481,16 +602,152 @@ _warmup_thread.start()
 async def health_check(request):
     """Health check endpoint (no auth required)"""
     from starlette.responses import JSONResponse
-    tools = await mcp.list_tools()
     return JSONResponse({
         "status": "healthy",
         "server": "TideWatch-观潮",
         "version": VERSION,
-        "transport": "streamable-http",
-        "tools_count": len(tools),
-        "auth_enabled": MCP_API_KEY_ENABLED,
-        "analyses_completed": server_stats["analyses_completed"],
     })
+
+
+@mcp.custom_route("/", methods=["GET"])
+async def dashboard_index(request):
+    from starlette.responses import FileResponse
+    return FileResponse(PROJECT_ROOT / "src" / "tidewatch" / "web" / "index.html")
+
+
+@mcp.custom_route("/styles.css", methods=["GET"])
+async def dashboard_styles(request):
+    from starlette.responses import FileResponse
+    return FileResponse(PROJECT_ROOT / "src" / "tidewatch" / "web" / "styles.css", media_type="text/css")
+
+
+@mcp.custom_route("/app.js", methods=["GET"])
+async def dashboard_script(request):
+    from starlette.responses import FileResponse
+    return FileResponse(PROJECT_ROOT / "src" / "tidewatch" / "web" / "app.js", media_type="text/javascript")
+
+
+@mcp.custom_route("/api/auth/login", methods=["POST"])
+async def dashboard_login(request):
+    from starlette.responses import JSONResponse
+    if not _dashboard_auth_configured():
+        return JSONResponse({"error": "Dashboard auth is not configured"}, status_code=503)
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        body = {}
+    if not _verify_dashboard_code(str(body.get("code", ""))):
+        return JSONResponse({"error": "验证码不正确"}, status_code=401)
+    response = JSONResponse({"ok": True})
+    response.set_cookie(
+        DASHBOARD_COOKIE,
+        _create_dashboard_session(),
+        max_age=DASHBOARD_SESSION_SECONDS,
+        httponly=True,
+        secure=request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https",
+        samesite="strict",
+        path="/",
+    )
+    return response
+
+
+@mcp.custom_route("/api/auth/session", methods=["GET"])
+async def dashboard_session(request):
+    from starlette.responses import JSONResponse
+    valid = _dashboard_auth_configured() and _verify_dashboard_session(request.cookies.get(DASHBOARD_COOKIE, ""))
+    return JSONResponse({"authenticated": valid})
+
+
+@mcp.custom_route("/api/auth/logout", methods=["POST"])
+async def dashboard_logout(request):
+    from starlette.responses import JSONResponse
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(DASHBOARD_COOKIE, path="/")
+    return response
+
+
+@mcp.custom_route("/api/dashboard/overview", methods=["GET"])
+async def dashboard_overview(request):
+    from starlette.responses import JSONResponse
+    data = await scan_market(top_n=5)
+    return JSONResponse(data)
+
+
+@mcp.custom_route("/api/dashboard/stocks/{symbol}", methods=["GET"])
+async def dashboard_stock(request):
+    from starlette.responses import JSONResponse
+    symbol = request.path_params["symbol"]
+    data = await analyze_stock(
+        symbol=symbol, skip_llm=True, include_news=False, include_money_flow=False
+    )
+    cached_items = []
+    cached_scan = _scan_cache.get("result") or {}
+    for key in ("holdings", "watchlist", "_hot_sorted", "hot_strongest", "hot_weakest"):
+        cached_items.extend(cached_scan.get(key) or [])
+    cached_stock = next((item for item in cached_items if str(item.get("code")) == symbol), None)
+    if cached_stock and cached_stock.get("conflicts"):
+        conflicts = list(data.get("conflicts") or [])
+        seen = {(item.get("type"), item.get("description")) for item in conflicts}
+        for conflict in cached_stock["conflicts"]:
+            key = (conflict.get("type"), conflict.get("description"))
+            if key not in seen:
+                conflicts.append(conflict)
+                seen.add(key)
+        data["conflicts"] = conflicts
+    if not data.get("degraded"):
+        data["meta"] = {
+            "status": "partial",
+            "warnings": ["资金面与新闻未阻塞快速详情，可通过 MCP 完整分析获取"],
+        }
+    return JSONResponse(_json_safe(data))
+
+
+@mcp.custom_route("/api/dashboard/narrative", methods=["POST"])
+async def dashboard_narrative(request):
+    from starlette.responses import JSONResponse
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        body = {}
+    template = str(body.get("template_narrative", ""))[:8000]
+    if not template:
+        return JSONResponse({"error": "缺少分析模板"}, status_code=400)
+    result = await polish_narrative_llm(
+        template_narrative=template,
+        stock_name=str(body.get("stock_name", ""))[:100],
+        score=int(body.get("score", 0)),
+        portfolio_context=str(body.get("portfolio_context", ""))[:2000],
+        news_headlines=str(body.get("news_headlines", ""))[:4000],
+    )
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/api/dashboard/signals", methods=["GET"])
+async def dashboard_signals(request):
+    from starlette.responses import JSONResponse
+    days = min(max(int(request.query_params.get("days", "3650")), 1), 3650)
+    limit = min(max(int(request.query_params.get("limit", "5000")), 1), 5000)
+    data = await review_signals(days=days, limit=limit)
+    return JSONResponse(data)
+
+
+@mcp.custom_route("/api/dashboard/regime", methods=["GET"])
+async def dashboard_regime(request):
+    from starlette.responses import JSONResponse
+    return JSONResponse(_json_safe(await get_regime()))
+
+
+@mcp.custom_route("/api/dashboard/backfill", methods=["POST"])
+async def dashboard_backfill(request):
+    from starlette.responses import JSONResponse
+    return JSONResponse(_json_safe(await update_signal_outcomes()))
+
+
+@mcp.custom_route("/api/dashboard/refresh", methods=["POST"])
+async def dashboard_refresh(request):
+    from starlette.responses import JSONResponse
+    data = await scan_market(top_n=5)
+    return JSONResponse(data)
 
 
 @mcp.tool()
@@ -528,7 +785,80 @@ async def analyze_stock(
             return {"error": f"无效的A股代码: {symbol}（应为6位数字）"}
 
     logger.info(f"📊 开始分析: {symbol}")
-    return await asyncio.to_thread(_analyze_stock_sync, symbol, include_news, include_money_flow, days, skip_llm)
+    async with _analysis_slots:
+        return await asyncio.to_thread(_analyze_stock_sync, symbol, include_news, include_money_flow, days, skip_llm)
+
+
+def _build_scan_cache_fallback(symbol: str):
+    """行情源不可用时，用最近一次完整扫描结果构造透明的降级报告。"""
+    cached = _scan_cache.get("result") or {}
+    cache_time = cached.get("timestamp")
+    try:
+        parsed_cache_time = datetime.fromisoformat(cache_time) if cache_time else None
+        if parsed_cache_time and not parsed_cache_time.tzinfo:
+            parsed_cache_time = parsed_cache_time.replace(tzinfo=_BJ_TZ)
+        cache_age = (_now_bj() - parsed_cache_time).total_seconds() if parsed_cache_time else float("inf")
+    except (TypeError, ValueError):
+        cache_age = float("inf")
+    if cache_age > 72 * 60 * 60:
+        logger.error("📦 %s 扫描缓存超过72小时，拒绝输出方向性降级报告", symbol)
+        return None
+
+    candidates = []
+    for key in ("holdings", "watchlist", "_hot_sorted", "hot_strongest", "hot_weakest"):
+        candidates.extend(cached.get(key) or [])
+    stock = next((item for item in candidates if str(item.get("code")) == symbol), None)
+    if not stock:
+        return None
+
+    score = int(stock.get("score", 0))
+    signal = stock.get("signal", "中性观望")
+    reasons_bull = stock.get("reasons_bull") or []
+    reasons_bear = stock.get("reasons_bear") or []
+    cache_time = cache_time or "未知时间"
+    reason_lines = []
+    if reasons_bull:
+        reason_lines.append("偏多依据：" + "；".join(reasons_bull))
+    if reasons_bear:
+        reason_lines.append("偏空依据：" + "；".join(reasons_bear))
+    reason_text = "\n".join(reason_lines) or "缓存中没有更多技术依据。"
+
+    logger.warning("📦 %s 行情获取失败，返回扫描缓存降级报告（%s）", symbol, cache_time)
+    return {
+        "degraded": True,
+        "degraded_reason": "实时行情数据源暂不可用，当前展示最近一次完整扫描缓存。",
+        "stock": {
+            "code": symbol,
+            "name": stock.get("name", symbol),
+            "price": stock.get("price", 0),
+            "pct_change": stock.get("pct_today", 0),
+        },
+        "signal": {
+            "direction": signal,
+            "raw_score": score,
+            "adjusted_score": score,
+            "regime_adjustment": 0,
+        },
+        "technical": {
+            "trend": {
+                "score": score,
+                "reasons_bull": reasons_bull,
+                "reasons_bear": reasons_bear,
+            },
+            "momentum": {"rsi_14": stock.get("rsi")},
+        },
+        "regime": {"regime": "unknown", "description": "实时体制不可用"},
+        "money_flow": {"error": "实时资金数据不可用"},
+        "news": [],
+        "conflicts": stock.get("conflicts") or [],
+        "narrative": (
+            f"实时行情数据源暂不可用，以下结论来自 {cache_time} 的扫描缓存。\n\n"
+            f"{stock.get('name', symbol)}当前缓存评分为 {score:+d}，信号为“{signal}”。\n"
+            f"{reason_text}\n\n"
+            "这不是实时深度分析，请勿仅凭此缓存结论进行交易决策。"
+        ),
+        "timestamp": cache_time,
+    }
 
 
 def _analyze_stock_sync(symbol, include_news, include_money_flow, days, skip_llm):
@@ -556,27 +886,22 @@ def _analyze_stock_sync(symbol, include_news, include_money_flow, days, skip_llm
     is_etf = market_data._is_etf(symbol)
     _is_us = is_us_stock(symbol)
 
-    # 并发拉取数据源（K线 + 指数 + 资金 + 新闻）
-    # 美股：使用 SPY 作为基准指数，跳过 A 股独有的资金流向
+    # 核心 K 线先取；失败时立即降级，避免继续放大资金/新闻请求。
     index_code = "SPY" if _is_us else "000001"
     _skip_money = _is_us or is_etf or not include_money_flow
     _skip_news = is_etf or not include_news  # 美股也拉新闻（yfinance）
-    _skip_lhb = _is_us or is_etf  # 龙虎榜仅 A 股非 ETF
-    # 不用 with（shutdown(wait=True) 会等所有 future，AKShare 挂住会拖死整个分析）
-    _executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
-    f_daily = _executor.submit(market_data.get_stock_daily, symbol, days)
-    f_index = _executor.submit(market_data.get_index_daily, index_code, days)
-    f_money = _executor.submit(market_data.get_money_flow, symbol) if not _skip_money else None
-    f_news = _executor.submit(market_data.get_stock_news, symbol, 5) if not _skip_news else None
-    f_lhb = _executor.submit(market_data.get_lhb, symbol) if not _skip_lhb else None
-    _executor.shutdown(wait=False)  # 不阻塞，各 future 独立完成
-
-    # 1. 日K线（核心数据源，必须成功）— baostock ~0.3s
-    df = f_daily.result(timeout=30)
+    _skip_lhb = _is_us or is_etf or (not include_news and not include_money_flow)
+    df = market_data.get_stock_daily(symbol, days)
     t1 = _time.monotonic()
     logger.info(f"⏱️ {symbol} 数据拉取: {t1-t0:.1f}s")
     if df.empty:
-        return {"error": f"无法获取 {symbol} 的行情数据"}
+        return _build_scan_cache_fallback(symbol) or {"error": f"无法获取 {symbol} 的行情数据"}
+
+    # 核心数据有效后再并发获取可选维度；全局执行器限制线程总量。
+    f_index = _data_executor.submit(market_data.get_index_daily, index_code, days)
+    f_money = _data_executor.submit(market_data.get_money_flow, symbol) if not _skip_money else None
+    f_news = _data_executor.submit(market_data.get_stock_news, symbol, 5) if not _skip_news else None
+    f_lhb = _data_executor.submit(market_data.get_lhb, symbol) if not _skip_lhb else None
 
     # 2. 技术分析（基于日K线）
     tech = technical.analyze(df)
@@ -660,35 +985,31 @@ def _analyze_stock_sync(symbol, include_news, include_money_flow, days, skip_llm
     #   P0: confidence < 40 强制中性（低 conf 47.8% ≈ 抛硬币, 高 conf 72.1%）
     #   P1: 偏空消灭 — [-25,-8) 合入中性（40% 胜率 + 反向收益 +2.07%）
     #   P2: mild_bull 下看空阈值收窄到 -35（mild_bull+偏空 33.3%）
-    _p0_downgraded = False  # 追踪 P0 降级，用于 record_signal 标注原始方向
-    if confidence_val < 40:
-        # P0: 计算原始方向用于回填分析追踪
-        if adjusted_score >= 50:
-            _p0_original = "看多"
-        elif adjusted_score <= -25:
-            _p0_original = "看空"
-        else:
-            _p0_original = None  # 本来就是中性，无需标注
-        if _p0_original:
-            _p0_downgraded = True
-            tech["trend"]["reasons_bear"].append(f"[P0降级] conf={confidence_val}<40, 原始方向={_p0_original}")
-        final_signal = "中性观望"
-    elif adjusted_score >= 50:
-        if regime_name == "mild_bear":
-            final_signal = "中性观望"
-        else:
-            final_signal = "看多"
-    elif adjusted_score >= 8:
-        final_signal = "中性观望"
-    elif adjusted_score <= -25:
-        # P2: mild_bull 下收窄到 -35 才算看空（[-35,-25) 在 mild_bull 下中性）
-        if regime_name == "mild_bull" and adjusted_score > -35:
-            final_signal = "中性观望"
-        else:
-            final_signal = "看空"
-    else:
-        # P1: [-25,-8) 原偏空区间 + [-8,+8) 均归入中性观望（偏空 40% 胜率+反向收益+2.07%）
-        final_signal = "中性观望"
+    final_signal, decision_tags = v4_official_decision(
+        adjusted_score, confidence_val, regime_name
+    )
+    if "p0_confidence_downgrade" in decision_tags:
+        _p0_original = "看多" if adjusted_score >= 50 else "看空"
+        tech["trend"]["reasons_bear"].append(
+            f"[P0降级] conf={confidence_val}<40, 原始方向={_p0_original}"
+        )
+
+    shadow_direction, shadow_tags = v5_shadow_decision(
+        final_signal, adjusted_score, confidence_val, regime_name
+    )
+
+    benchmark_symbol = index_code
+    benchmark_date_at_signal = ""
+    benchmark_price_at_signal = None
+    if not index_df.empty:
+        benchmark_price_at_signal = float(index_df.iloc[-1]["close"])
+        if "date" in index_df.columns:
+            benchmark_date_at_signal = pd.Timestamp(index_df.iloc[-1]["date"]).date().isoformat()
+    benchmark_pct_20d = regime_result.get("metrics", {}).get("pct_20d")
+    stock_pct_20d = tech.get("price_position", {}).get("pct_20d")
+    relative_strength_20d = None
+    if stock_pct_20d is not None and benchmark_pct_20d is not None:
+        relative_strength_20d = round(float(stock_pct_20d) - float(benchmark_pct_20d), 2)
 
     server_stats["analyses_completed"] += 1
 
@@ -738,6 +1059,12 @@ def _analyze_stock_sync(symbol, include_news, include_money_flow, days, skip_llm
             "adjusted_score": adjusted_score,
             "confidence": confidence_val,
             "regime_adjustment": regime_adj["signal_bias"],
+            "strategy_version": OFFICIAL_STRATEGY_VERSION,
+            "decision_tags": decision_tags,
+            "shadow_direction": shadow_direction,
+            "shadow_policy": SHADOW_POLICY_VERSION,
+            "shadow_tags": shadow_tags,
+            "relative_strength_20d": relative_strength_20d,
         },
         "technical": tech,
         "regime": regime_result,
@@ -816,6 +1143,16 @@ def _analyze_stock_sync(symbol, include_news, include_money_flow, days, skip_llm
             reasons_bull=tech["trend"].get("reasons_bull", []),
             reasons_bear=tech["trend"].get("reasons_bear", []),
             conflicts=conflicts,
+            raw_score=raw_score,
+            strategy_version=OFFICIAL_STRATEGY_VERSION,
+            signal_source="holding" if _holding else "watchlist" if _watching else "manual",
+            decision_tags=decision_tags,
+            shadow_direction=shadow_direction,
+            shadow_policy=SHADOW_POLICY_VERSION,
+            benchmark_symbol=benchmark_symbol,
+            benchmark_date_at_signal=benchmark_date_at_signal,
+            benchmark_price_at_signal=benchmark_price_at_signal,
+            relative_strength_20d=relative_strength_20d,
         )
         report["signal"]["tracked_id"] = signal_id
       except Exception as e:
@@ -861,7 +1198,8 @@ async def polish_narrative_llm(
     if news_headlines:
         news = [{"title": t.strip()} for t in news_headlines.split("\n") if t.strip()]
     try:
-        polished = polish_narrative(
+        polished = await asyncio.to_thread(
+            polish_narrative,
             template_narrative, stock_name, score,
             portfolio_context=portfolio_context,
             news=news,
@@ -886,7 +1224,7 @@ async def get_regime():
     """
     logger.info("🌊 感知潮势...")
 
-    index_df = market_data.get_index_daily("000001", days=120)
+    index_df = await asyncio.to_thread(market_data.get_index_daily, "000001", 120)
     regime_result = regime_detector.detect(index_df)
 
     if regime_result["regime"] == "unknown":
@@ -898,7 +1236,7 @@ async def get_regime():
     indices = {}
     for code, name in [("000001", "上证指数"), ("399001", "深证成指"), ("399006", "创业板指")]:
         try:
-            idx_df = market_data.get_index_daily(code, days=5)
+            idx_df = await asyncio.to_thread(market_data.get_index_daily, code, 5)
             if not idx_df.empty:
                 latest = idx_df["close"].iloc[-1]
                 prev = idx_df["close"].iloc[-2]
@@ -938,8 +1276,10 @@ async def compare_stocks(symbols: str):
 
     results = []
     for code in codes[:10]:  # 最多10只
-        name = market_data.get_stock_name(code)
-        df = market_data.get_stock_daily(code, days=120)
+        name, df = await asyncio.gather(
+            asyncio.to_thread(market_data.get_stock_name, code),
+            asyncio.to_thread(market_data.get_stock_daily, code, 120),
+        )
         if df.empty:
             results.append({"code": code, "name": name, "error": "数据获取失败"})
             continue
@@ -993,13 +1333,12 @@ async def get_money_flow_detail(symbol: str, days: int = 10):
     Returns:
         资金流向分析报告
     """
-    name = market_data.get_stock_name(symbol)
-
-    # 当日快照
-    current = market_data.get_money_flow(symbol)
-
-    # 历史趋势
-    history_df = market_data.get_money_flow_history(symbol, days=days)
+    name, current, history_df, lhb = await asyncio.gather(
+        asyncio.to_thread(market_data.get_stock_name, symbol),
+        asyncio.to_thread(market_data.get_money_flow, symbol),
+        asyncio.to_thread(market_data.get_money_flow_history, symbol, days),
+        asyncio.to_thread(market_data.get_lhb, symbol),
+    )
 
     history_summary = {}
     if not history_df.empty and "main_net" in history_df.columns:
@@ -1011,9 +1350,6 @@ async def get_money_flow_detail(symbol: str, days: int = 10):
             "negative_days": int((main_net < 0).sum()),
             "trend": "持续流入" if main_net.tail(3).mean() > 0 else "持续流出",
         }
-
-    # 龙虎榜
-    lhb = market_data.get_lhb(symbol)
 
     return {
         "stock": {"code": symbol, "name": name},
@@ -1038,8 +1374,10 @@ async def get_stock_news_report(symbol: str, limit: int = 10):
     Returns:
         新闻列表
     """
-    name = market_data.get_stock_name(symbol)
-    news = market_data.get_stock_news(symbol, limit=limit)
+    name, news = await asyncio.gather(
+        asyncio.to_thread(market_data.get_stock_name, symbol),
+        asyncio.to_thread(market_data.get_stock_news, symbol, limit),
+    )
 
     return {
         "stock": {"code": symbol, "name": name},
@@ -1063,7 +1401,7 @@ async def get_north_flow_report(days: int = 20):
     Returns:
         北向资金流向报告
     """
-    df = market_data.get_north_flow(days=days)
+    df = await asyncio.to_thread(market_data.get_north_flow, days)
     if df.empty:
         return {"error": "北向资金数据获取失败"}
 
@@ -1119,8 +1457,10 @@ async def review_signals(days: int = 30, symbol: str = "", limit: int = 200):
     Returns:
         信号列表 + 胜率统计
     """
-    stats = get_signal_stats(days=days)
-    recent = get_recent_signals(days=days, symbol=symbol if symbol else None)
+    stats, recent = await asyncio.gather(
+        asyncio.to_thread(get_signal_stats, days),
+        asyncio.to_thread(get_recent_signals, days, symbol if symbol else None),
+    )
 
     # 简化信号列表（只保留关键字段）
     signals_summary = []
@@ -1134,14 +1474,25 @@ async def review_signals(days: int = 30, symbol: str = "", limit: int = 200):
             "direction": s["direction"],
             "score": s["score"],
             "price": s["price_at_signal"],
+            "raw_score": s.get("raw_score"),
+            "confidence": s.get("confidence"),
+            "strategy_version": s.get("strategy_version"),
+            "signal_source": s.get("signal_source"),
+            "decision_tags": s.get("decision_tags"),
+            "shadow_direction": s.get("shadow_direction"),
+            "shadow_policy": s.get("shadow_policy"),
+            "relative_strength_20d": s.get("relative_strength_20d"),
         }
         # 添加回填结果（如果有）
         if s.get("pct_5d") is not None:
-            entry["5d"] = f"{s['pct_5d']:+.1f}% ({s['outcome_5d']})"
+            entry["5d"] = f"{s['pct_5d']:+.1f}% ({s['action_outcome_5d']})"
         if s.get("pct_10d") is not None:
-            entry["10d"] = f"{s['pct_10d']:+.1f}% ({s['outcome_10d']})"
+            entry["10d"] = f"{s['pct_10d']:+.1f}% ({s['action_outcome_10d']})"
         if s.get("pct_20d") is not None:
-            entry["20d"] = f"{s['pct_20d']:+.1f}% ({s['outcome_20d']})"
+            entry["20d"] = f"{s['pct_20d']:+.1f}% ({s['action_outcome_20d']})"
+        for period in ("5d", "10d", "20d"):
+            if s.get(f"shadow_outcome_{period}"):
+                entry[f"shadow_{period}"] = s[f"shadow_outcome_{period}"]
         signals_summary.append(entry)
 
     return {
@@ -1165,11 +1516,18 @@ async def update_signal_outcomes():
         回填统计（更新了多少条 5d/10d/20d 记录）
     """
     result = await asyncio.to_thread(update_outcomes, market_data)
-    return {
+    shadow_result = await asyncio.to_thread(update_shadow_outcomes)
+    response = {
         "updated": result,
+        "shadow_updated": shadow_result,
         "message": f"回填完成: 5日={result['5d']}条, 10日={result['10d']}条, 20日={result['20d']}条",
         "timestamp": _now_bj().isoformat(),
     }
+    error_count = int(result.get("errors", 0))
+    if error_count:
+        response["degraded"] = True
+        response["error"] = f"回填过程中有 {error_count} 条信号处理失败，请检查服务日志"
+    return response
 
 
 @mcp.tool()
@@ -1367,8 +1725,12 @@ async def scan_market(top_n: int = 10, force_refresh: bool = False):
             if not should_force:
                 logger.info("⚙️ 非盘中，使用已有缓存（数据不变）")
                 return _slice_scan_cache(top_n)
-            # 强制刷新：走 _run_scan_warmup 确保持久化到 scan_cache.json
-            await asyncio.to_thread(_run_scan_warmup)
+            # 先返回旧缓存，后台补齐收盘数据；上游故障时不能阻塞 Dashboard。
+            if not _scan_bg_refreshing:
+                _scan_bg_refreshing = True
+                asyncio.get_event_loop().run_in_executor(None, _bg_refresh_scan)
+            else:
+                logger.info("♻️ 收盘数据后台刷新已在进行")
             return _slice_scan_cache(top_n)
         # 盘中过期，先返回后台刷新
         if not _scan_bg_refreshing:
@@ -1392,6 +1754,36 @@ def _slice_scan_cache(top_n: int):
     output = {k: v for k, v in cached.items() if not k.startswith("_")}
     output["hot_strongest"] = hot_all[:top_n]
     output["hot_weakest"] = sorted(hot_all[-top_n:], key=lambda x: x["score"]) if len(hot_all) > top_n else []
+    timestamp = cached.get("timestamp")
+    age_seconds = None
+    if timestamp:
+        try:
+            data_time = datetime.fromisoformat(timestamp)
+            if not data_time.tzinfo:
+                data_time = data_time.replace(tzinfo=_BJ_TZ)
+            age_seconds = max(0, int((_now_bj() - data_time).total_seconds()))
+        except (TypeError, ValueError):
+            pass
+    market_data_date = cached.get("market_data_date")
+    now = _now_bj()
+    market_date_is_current = market_data_date == _expected_market_data_date(now)
+    if age_seconds is None:
+        status = "degraded"
+    elif market_date_is_current and (not _is_market_hours() or age_seconds <= _SCAN_CACHE_TTL):
+        status = "fresh"
+    elif age_seconds <= 72 * 60 * 60:
+        status = "stale"
+    else:
+        status = "degraded"
+    output["meta"] = {
+        "status": status,
+        "data_timestamp": timestamp,
+        "generated_at": _now_bj().isoformat(),
+        "age_seconds": age_seconds,
+        "source": cached.get("sources") or ["scan_cache"],
+        "market_data_date": market_data_date,
+        "refreshing": _scan_run_lock.locked() or _scan_bg_refreshing,
+    }
     return output
 
 
@@ -1517,10 +1909,85 @@ def _detect_conflicts(
 # ============================================================================
 
 
+def _b64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
+
+
+def _json_safe(value):
+    """Convert pandas/numpy values to JSON-native values without stringifying booleans."""
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.isoformat()
+    if pd.isna(value) if not isinstance(value, (str, bytes)) else False:
+        return None
+    return value
+
+
+def _b64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _dashboard_auth_configured() -> bool:
+    return DASHBOARD_AUTH_DISABLED or bool(DASHBOARD_CODE_HASH and DASHBOARD_SESSION_SECRET)
+
+
+def _verify_dashboard_code(code: str) -> bool:
+    if DASHBOARD_AUTH_DISABLED:
+        return True
+    try:
+        algorithm, salt_b64, expected_b64 = DASHBOARD_CODE_HASH.split("$", 2)
+        if algorithm != "scrypt":
+            return False
+        actual = hashlib.scrypt(
+            code.encode(), salt=_b64url_decode(salt_b64), n=2**14, r=8, p=1, dklen=32
+        )
+        return hmac.compare_digest(actual, _b64url_decode(expected_b64))
+    except (TypeError, ValueError):
+        return False
+
+
+def _create_dashboard_session() -> str:
+    now = int(_time.time())
+    payload = _b64url_encode(json.dumps({
+        "sub": "polly", "iat": now, "exp": now + DASHBOARD_SESSION_SECONDS,
+        "v": DASHBOARD_SESSION_VERSION,
+    }, separators=(",", ":")).encode())
+    signature = hmac.new(DASHBOARD_SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).digest()
+    return f"{payload}.{_b64url_encode(signature)}"
+
+
+def _verify_dashboard_session(token: str) -> bool:
+    if DASHBOARD_AUTH_DISABLED:
+        return True
+    if not token or not DASHBOARD_SESSION_SECRET:
+        return False
+    try:
+        payload, signature = token.split(".", 1)
+        expected = hmac.new(DASHBOARD_SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).digest()
+        if not hmac.compare_digest(expected, _b64url_decode(signature)):
+            return False
+        data = json.loads(_b64url_decode(payload))
+        return (
+            data.get("sub") == "polly"
+            and data.get("v") == DASHBOARD_SESSION_VERSION
+            and int(data.get("exp", 0)) > int(_time.time())
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
 class APIKeyMiddleware:
     """Pure ASGI middleware to validate API key for protected endpoints."""
 
-    PUBLIC_PATHS = {"/health", "/favicon.ico"}
+    PUBLIC_PATHS = {
+        "/", "/health", "/favicon.ico", "/styles.css", "/app.js",
+        "/api/auth/login", "/api/auth/session", "/api/auth/logout",
+    }
 
     def __init__(self, app):
         self.app = app
@@ -1530,25 +1997,40 @@ class APIKeyMiddleware:
             await self.app(scope, receive, send)
             return
 
-        if not MCP_API_KEY_ENABLED:
-            await self.app(scope, receive, send)
-            return
-
         path = scope["path"]
         if path in self.PUBLIC_PATHS:
             await self.app(scope, receive, send)
             return
 
-        # Extract API key from headers
-        api_key = None
         headers = dict(scope.get("headers", []))
+        if path.startswith("/api/dashboard/"):
+            cookie_header = headers.get(b"cookie", b"").decode()
+            cookies = {}
+            for part in cookie_header.split(";"):
+                if "=" in part:
+                    key, value = part.strip().split("=", 1)
+                    cookies[key] = value
+            if _verify_dashboard_session(cookies.get(DASHBOARD_COOKIE, "")):
+                await self.app(scope, receive, send)
+                return
+            from starlette.responses import JSONResponse
+            response = JSONResponse({"error": "Unauthorized"}, status_code=401)
+            await response(scope, receive, send)
+            return
+
+        if not MCP_API_KEY_ENABLED:
+            await self.app(scope, receive, send)
+            return
+
+        # Extract API key from headers
+        api_key = ""
         api_key = headers.get(b"x-api-key", b"").decode()
         if not api_key:
             auth_header = headers.get(b"authorization", b"").decode()
             if auth_header.startswith("Bearer "):
                 api_key = auth_header[7:]
 
-        if api_key != MCP_API_KEY:
+        if not hmac.compare_digest(api_key, MCP_API_KEY):
             from starlette.responses import JSONResponse
             response = JSONResponse(
                 {"error": "Unauthorized", "message": "Invalid or missing API key"},
@@ -1607,15 +2089,8 @@ def main():
     if args.http:
         logger.info(f"传输模式: HTTP (Streamable HTTP) → {args.host}:{args.port}/mcp")
         logger.info(f"API Key 认证: {'✅ 已启用' if MCP_API_KEY_ENABLED else '❌ 未配置'}")
-        mcp.run(
-            transport="streamable-http",
-            host=args.host,
-            port=args.port,
-            path="/mcp",
-            middleware=_build_middleware(),
-            json_response=True,
-            stateless_http=True,
-        )
+        import uvicorn
+        uvicorn.run(http_app, host=args.host, port=args.port)
     else:
         logger.info("传输模式: stdio (本地)")
         mcp.run()

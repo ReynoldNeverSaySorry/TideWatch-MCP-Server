@@ -10,3 +10,10 @@ build/
 *.db
 .mypy_cache/
 .pytest_cache/
+
+# Hackathon video production outputs (keep plans, prompts, and scripts tracked)
+Hackathon/video/assets/audio/
+Hackathon/video/assets/charts/
+Hackathon/video/assets/screen-recordings/
+Hackathon/video/assets/screenshots/
+Hackathon/video/exports/
